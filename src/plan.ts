@@ -1,7 +1,7 @@
 import { listCards, setStatus, stripLeadingHeading, upsertSection } from './board.ts'
 import { invoke, isRateLimited } from './claude.ts'
 import { expandHome } from './gate.ts'
-import { PM } from './roles.ts'
+import { loadAgents } from './agents.ts'
 import { STATUS, type Card } from './types.ts'
 
 /**
@@ -32,6 +32,7 @@ export async function planAll(opts: PlanOptions): Promise<PlanSummary> {
   const log = opts.log ?? ((l: string) => console.log(l))
   const s: PlanSummary = { planned: 0, failed: 0, stoppedByLimit: false, costUsd: 0 }
 
+  const agents = await loadAgents(opts.boardDir)
   const all = await listCards(opts.boardDir)
   const pending = all
     .filter((c) => c.status === STATUS.規劃中)
@@ -59,7 +60,7 @@ export async function planAll(opts: PlanOptions): Promise<PlanSummary> {
 
     log(`▸  ${card.id} ${card.title}`)
     const repo = expandHome(card.runner.project)
-    const r = await invoke(PM, planPrompt(card), { cwd: repo })
+    const r = await invoke(agents.pm, planPrompt(card), { cwd: repo })
     s.costUsd += r.costUsd ?? 0
 
     if (isRateLimited(r)) {

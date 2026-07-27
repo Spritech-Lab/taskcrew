@@ -35,6 +35,8 @@ export interface FixtureOptions {
   status?: string
   /** 覆寫卡片的內文區塊 */
   sections?: Partial<Record<'Description' | 'Acceptance Criteria' | 'Implementation Plan', string>>
+  /** board 層的 agent 定義覆寫。key 是檔名，例如 'qa.md' */
+  agents?: Record<string, string>
   /** 額外的卡（測依賴 / 父子用）。key 是 id 後綴 */
   extraCards?: { id: string; status: string; frontmatter?: string }[]
   dependencies?: string[]
@@ -100,6 +102,14 @@ export async function makeFixture(o: FixtureOptions): Promise<Fixture> {
       `---\nid: ${extra.id}\ntitle: x\nstatus: ${extra.status}\nlabels: []\ndependencies: []\n---\n`,
       'utf8',
     )
+  }
+
+  // ── board 層的 agent 覆寫 ──
+  if (o.agents) {
+    await mkdir(join(boardDir, 'agents'), { recursive: true })
+    for (const [name, content] of Object.entries(o.agents)) {
+      await writeFile(join(boardDir, 'agents', name), content, 'utf8')
+    }
   }
 
   // ── 假 agent 放進 PATH 最前面 ──

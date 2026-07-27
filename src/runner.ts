@@ -1,3 +1,4 @@
+import { loadAgents } from './agents.ts'
 import { listCards, setStatus } from './board.ts'
 import { checkGate } from './gate.ts'
 import { runPipeline } from './pipeline.ts'
@@ -39,6 +40,7 @@ export async function drain(opts: DrainOptions): Promise<DrainSummary> {
     costUsd: 0,
   }
 
+  const agents = await loadAgents(opts.boardDir)
   const all = await listCards(opts.boardDir)
   const queue = all
     .filter((c) => c.status === STATUS.待執行)
@@ -75,7 +77,7 @@ export async function drain(opts: DrainOptions): Promise<DrainSummary> {
     log(`▸  ${card.id} ${card.title}`)
     await setStatus(card, STATUS.執行中)
 
-    const r = await runPipeline(card, { log })
+    const r = await runPipeline(card, { log, agents })
     s.costUsd += r.costUsd
 
     switch (r.kind) {

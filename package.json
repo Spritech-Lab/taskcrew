@@ -15,5 +15,10 @@
   },
   "dependencies": {
     "yaml": "^2.7.0"
-  }
+  },
+  "files": [
+    "src/",
+    "agents/",
+    "README.md"
+  ]
 }

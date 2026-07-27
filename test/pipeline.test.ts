@@ -325,3 +325,21 @@ test('PM 回覆無法解析 → 失敗並說明，不亂猜一個決定', async 
   assert.equal(summary.failed, 1)
   assert.match(log, /沒有給出可解析的決定/)
 })
+
+test('board 層的 agent 覆寫會真的影響產線呼叫的模型', async () => {
+  const { fx, summary } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    // 把 QA 從 haiku 換成 sonnet、effort 拉到 max
+    agents: { 'qa.md': '---\nname: qa\nmodel: sonnet\neffort: max\n---\n你是 QA。' },
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+
+  assert.equal(summary.done, 1)
+  const calls = await fx.calls()
+  assert.deepEqual(
+    calls.map((c) => `${c.model}/${c.effort}`),
+    ['sonnet/high', 'opus/xhigh', 'sonnet/max'],
+    '第三個呼叫是 QA —— 應該用 board 覆寫後的 sonnet/max，不是預設的 haiku/medium',
+  )
+})

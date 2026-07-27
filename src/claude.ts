@@ -43,14 +43,25 @@ export const DENIED_TOOLS = [
 
 export type Role = 'pm' | 'junior' | 'senior' | 'qa'
 
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
 export interface AgentSpec {
   role: Role
   /** claude --model 的值（別名或完整名稱） */
   model: string
   /** claude --effort 的值 */
-  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  effort: Effort
   /** 這個角色的系統提示，附加在預設系統提示之後 */
   systemPrompt: string
+  /**
+   * 這個角色**需要**哪些工具（正面表列，來自 agent 定義檔的 `tools:`）。
+   * 未指定代表不額外限制。
+   *
+   * 注意這跟 DENIED_TOOLS 是不同層級：這裡是使用者可調的「需要什麼」，
+   * DENIED_TOOLS 是寫死的「什麼都不准」。deny 永遠優先 ——
+   * 編輯 agent 定義檔不該有可能意外授予 push 權限。
+   */
+  tools?: string[]
 }
 
 export interface AgentResult {
@@ -93,6 +104,9 @@ export async function invoke(
     // 無人看管 —— 沒有人在旁邊按核准。安全性由 --disallowed-tools 保證，不由提示保證。
     '--permission-mode',
     'bypassPermissions',
+    // deny 放在最後，語意上也在最後 —— 就算 agent 定義檔把某個工具列進
+    // allowed，這裡的拒絕仍然生效。
+    ...(spec.tools?.length ? ['--allowed-tools', ...spec.tools] : []),
     '--disallowed-tools',
     ...denied,
   ]

@@ -1,7 +1,7 @@
 import { stripLeadingHeading, upsertSection } from './board.ts'
-import { invoke, isRateLimited } from './claude.ts'
+import { invoke, isRateLimited, type AgentSpec } from './claude.ts'
 import { expandHome } from './gate.ts'
-import { JUNIOR_RD, PM, QA, SENIOR_RD } from './roles.ts'
+import type { Agents } from './agents.ts'
 import { describeVerdict, parseVerdict, type QaVerdict } from './qa.ts'
 import { analyze, describe, shouldEscalate } from './shape.ts'
 import { git } from './shell.ts'
@@ -78,6 +78,8 @@ export type PipelineResult =
 
 export interface PipelineOptions {
   log: (line: string) => void
+  /** 從 board 載入的 agent 編制。使用者可在 <board>/agents/*.md 覆寫 */
+  agents: Agents
 }
 
 export async function runPipeline(
@@ -87,6 +89,7 @@ export async function runPipeline(
   const cfg = card.runner!
   const repo = expandHome(cfg.project)
   const log = opts.log
+  const agents = opts.agents
 
   const attempts: AttemptRecord[] = []
   const excluded: string[] = []
@@ -116,7 +119,7 @@ export async function runPipeline(
     let pendingReplacement = ''
 
     while (true) {
-      const attempt = await runAttempt(card, repo, branch, plan, attemptNo, planVersion, log)
+      const attempt = await runAttempt(card, repo, branch, plan, attemptNo, planVersion, log, agents)
       attempts.push(attempt)
       cost += attempt.cost
 
@@ -136,7 +139,7 @@ export async function runPipeline(
         break
       }
 
-      const pm = await askPm(card, attempt, excluded, repo, 'decide')
+      const pm = await askPm(agents.pm, card, attempt, excluded, repo, 'decide')
       cost += pm.cost
       if (pm.rateLimited) return { kind: 'rate-limited', attempts, costUsd: cost }
       if (!pm.decision) {
@@ -180,7 +183,7 @@ export async function runPipeline(
 
     if (!pendingReplacement.trim()) {
       // 「修正次數用完」那條路徑還沒拿到新 plan，這裡才去要
-      const pm = await askPm(card, attempts[attempts.length - 1], excluded, repo, 'force-replace')
+      const pm = await askPm(agents.pm, card, attempts[attempts.length - 1], excluded, repo, 'force-replace')
       cost += pm.cost
       if (pm.rateLimited) return { kind: 'rate-limited', attempts, costUsd: cost }
       if (!pm.decision || pm.decision.kind === 'handback') {
@@ -220,6 +223,7 @@ async function runAttempt(
   attemptNo: number,
   planVersion: number,
   log: (l: string) => void,
+  agents: Agents,
 ): Promise<AttemptRecord> {
   const cfg = card.runner!
   const tag = planVersion === 1 ? `方案 ${attemptNo}` : `方案 ${attemptNo}·v${planVersion}`
@@ -236,7 +240,7 @@ async function runAttempt(
 
   for (let roundNo = 1; roundNo <= MAX_ROUNDS; roundNo++) {
     const isFirst = roundNo === 1
-    const dev = isFirst ? JUNIOR_RD : SENIOR_RD
+    const dev = isFirst ? agents.junior : agents.senior
     const round: RoundRecord = {
       no: roundNo,
       role: isFirst ? 'junior' : 'senior',
@@ -290,7 +294,7 @@ async function runAttempt(
     // 減法只在第一輪做 —— 第二輪的開發者就是 senior，他寫的時候已經在減了。
     if (isFirst && passed(v)) {
       log(`   [${tag}·輪 ${roundNo}] senior 減法 review`)
-      const reduce = await invoke(SENIOR_RD, reducePrompt(card, plan), { cwd: repo })
+      const reduce = await invoke(agents.senior, reducePrompt(card, plan), { cwd: repo })
       round.cost += reduce.costUsd ?? 0
       rec.cost += reduce.costUsd ?? 0
       if (isRateLimited(reduce)) {
@@ -309,7 +313,7 @@ async function runAttempt(
 
     if (passed(v)) {
       log(`   [${tag}·輪 ${roundNo}] QA 判定`)
-      const qaResult = await invoke(QA, qaPrompt(card, plan, v.results), { cwd: repo })
+      const qaResult = await invoke(agents.qa, qaPrompt(card, plan, v.results), { cwd: repo })
       round.cost += qaResult.costUsd ?? 0
       rec.cost += qaResult.costUsd ?? 0
       if (isRateLimited(qaResult)) {
@@ -350,13 +354,14 @@ async function runAttempt(
 // ── PM：修正、換方案，還是交回人 ────────────────────────────────────────
 
 async function askPm(
+  pmSpec: AgentSpec,
   card: Card,
   failed: AttemptRecord,
   excluded: readonly string[],
   repo: string,
   mode: 'decide' | 'force-replace',
 ): Promise<{ decision: PmDecision | null; cost: number; rateLimited: boolean }> {
-  const r = await invoke(PM, pmPrompt(card, failed, excluded, mode), { cwd: repo })
+  const r = await invoke(pmSpec, pmPrompt(card, failed, excluded, mode), { cwd: repo })
   const cost = r.costUsd ?? 0
   if (isRateLimited(r)) return { decision: null, cost, rateLimited: true }
   if (!r.ok) return { decision: null, cost, rateLimited: false }

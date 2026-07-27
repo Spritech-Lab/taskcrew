@@ -63,6 +63,8 @@ Cards in the queue **only queue**. Nothing starts until you issue a command — 
 
 ### The pipeline
 
+Each role is a **separate agent definition you own** — see [Customizing agents](#customizing-agents).
+
 ```
 PM (opus/xhigh)        →  implementation plan  →  you approve
     ↓
@@ -114,6 +116,41 @@ No agent is asked for an opinion here. Getting this wrong sends the whole effort
 **Guardrails are mechanical, not requested.** Pushing, touching `main`, editing `.env`, restarting services — these are blocked with `--disallowed-tools`, not asked for politely in a prompt. An agent that misjudges still cannot do anything irreversible.
 
 **A card is only as large as one reviewable diff.** The bottleneck is your attention, not the machine's throughput. An oversized card doesn't go faster; it produces a diff you skim and rubber-stamp, which means you no longer have a review step.
+
+## Customizing agents
+
+`taskcrew init` writes four agent definitions into your board. They use Claude Code's
+native agent file format, so the same definitions work in interactive Claude Code too.
+
+```
+<board>/agents/
+  pm.md          model: opus    effort: xhigh
+  junior-rd.md   model: sonnet  effort: high
+  senior-rd.md   model: opus    effort: xhigh
+  qa.md          model: haiku   effort: medium
+```
+
+```yaml
+---
+name: taskcrew-qa
+description: Judges whether the output meets the requirement.
+model: haiku
+effort: medium
+tools: Read, Glob, Grep      # optional — what this role needs
+---
+（the system prompt goes here）
+```
+
+Change the model or the reasoning effort by editing the frontmatter. No taskcrew source
+involved. Definitions live in the **board repo**, so they version alongside your cards —
+and two boards can run entirely different crews.
+
+**Two things are deliberately *not* in these files:**
+
+| | Where | Why |
+|---|---|---|
+| Shared protocol rules (`BLOCKED:` signal, never commit or push, scope limits) | Prepended in code | Editing an agent file must not be able to delete a safety rule |
+| The hard denial list (push, `main`, `.env`, service restarts) | `--disallowed-tools`, hardcoded | `tools:` says what a role *needs*; the denial says what *nothing* may do. Deny always wins |
 
 ## Card format
 

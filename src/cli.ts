@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-import { resolve } from 'node:path'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
+import { defaultAgentFiles } from './agents.ts'
 import { planAll } from './plan.ts'
 import { countPlanning, drain } from './runner.ts'
 
@@ -18,6 +20,7 @@ const USAGE = `
 taskcrew — 把 Backlog.md 看板變成無人看管的多 agent 開發產線
 
 用法：
+  taskcrew init [board]    把 agent 定義寫進 <board>/agents/，之後你自己調
   taskcrew plan [board]    PM 研究 codebase，把「規劃中」的卡產出做法
   taskcrew run  [board]    排空「待執行」欄
   taskcrew <cmd> --dry     只列出會做什麼，不實際執行
@@ -39,6 +42,24 @@ async function main(argv: string[]): Promise<number> {
     console.log(USAGE)
     return 0
   }
+  if (cmd === 'init') {
+    const dir = resolve(rest.find((a) => !a.startsWith('-')) ?? process.cwd())
+    const agentsDir = join(dir, 'agents')
+    await mkdir(agentsDir, { recursive: true })
+    for (const f of await defaultAgentFiles()) {
+      // 不覆寫 —— 使用者調過的東西不能被 init 洗掉
+      const target = join(agentsDir, f.name)
+      try {
+        await writeFile(target, f.content, { encoding: 'utf8', flag: 'wx' })
+        console.log(`  建立 agents/${f.name}`)
+      } catch {
+        console.log(`  略過 agents/${f.name}（已存在）`)
+      }
+    }
+    console.log('\n改 model 或 effort 就編輯這些檔案的 frontmatter。')
+    return 0
+  }
+
   if (cmd !== 'run' && cmd !== 'plan') {
     console.error(`未知的指令：${cmd}\n`)
     console.error(USAGE)
