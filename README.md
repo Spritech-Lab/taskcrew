@@ -1,103 +1,190 @@
 # taskcrew
 
-把 [Backlog.md](https://github.com/MrLesk/Backlog.md) 看板變成一條無人看管的多 agent 開發產線。
+> Turn a [Backlog.md](https://github.com/MrLesk/Backlog.md) board into an unattended multi-agent development pipeline.
 
-跑在**你自己本機的 Claude Code** 之上，因此吃的是你既有的訂閱額度 —— 不需要 API key，不產生額外帳單。taskcrew 從頭到尾不碰認證。
+taskcrew drives **your own local [Claude Code](https://claude.com/claude-code)** — so it runs on the Claude subscription you already have. No API key, no separate bill. taskcrew never touches authentication.
 
-> **狀態：Phase 2。** 四角產線（PM / junior RD / senior RD / QA）與三層循環已實測可用。
-> 常駐服務、Redis queue、Postgres 執行歷史、多入口介面還沒做 —— 見下方 Roadmap。
-
-## 它做什麼
-
-你在看板上把一張卡從「設計待批准」拖到「待執行」，就等於批准了它。之後你下一個指令，
-taskcrew 逐張把卡做完：開專用分支、交給 agent 實作、跑你指定的驗收指令、把結果寫回卡片，
-然後停在「執行完成回報」等你驗收。
+You approve a card. It gets built, reviewed, tested, and handed back for your sign-off.
 
 ```
-開卡 → 需求討論 → 規劃中 → 設計待批准 → 待執行 → 執行中 → 執行完成回報 → 完成
-        ↑           ↑          ↑                                      │
-        └───────────┴──────────┴─────── 不滿意，拖回來再談一輪 ←───────┘
+$ taskcrew run
+
+▸  TASK-178 Handle punctuation and whitespace in slug()
+   [attempt 1] branch task/task-178-attempt-1
+   [attempt 1·round 1] junior develops (sonnet / high)
+   [attempt 1·round 1] verify 3/3 passed
+   [attempt 1·round 1] senior reduction review
+   [attempt 1·round 1] verify after reduction 3/3 passed
+   [attempt 1·round 1] QA verdict
+   ✓ passed (1 attempt, $0.19)
 ```
 
-## 三個設計取捨
+> **Status: early.** The pipeline works end to end and is covered by 38 tests, but the
+> resident service, Redis queue, and multi-channel intake are not built yet. See [Roadmap](#roadmap).
 
-**入口愈開放愈好，閘門愈嚴愈好。** 誰都可以建卡 —— 對話、Discord bot、web UI、你寫的腳本。
-品質不靠限制入口保證，靠卡進「待執行」時的七項檢查。其中最硬的一條：**每條驗收條件都必須
-掛到一個可執行的 test case**。寫不出對應測試的條件，就不是驗收條件，是願望。
+## Install
 
-**「有沒有做到」用機械判定，「做得好不好」才交給判斷力。** 驗收指令必須產出逐條結果，
-不能只有 exit code —— 因為跨輪比較逐條結果的變化，是分辨「實作沒寫對」和「方案本身不對」
-的唯一客觀依據。
-
-**保護在機制層，不在約定層。** push、碰 main、動 `.env`、重啟線上服務，這些是用
-`--disallowed-tools` 封死的，不是在 prompt 裡拜託 agent 不要做。就算 agent 判斷錯誤，
-也做不出不可逆的事。
-
-## 安裝
-
-需要 Node ≥ 24（原生執行 TypeScript，沒有 build step）與已登入的 [Claude Code](https://claude.com/claude-code)。
+Requires **Node ≥ 24** (runs TypeScript natively — no build step) and a logged-in Claude Code.
 
 ```bash
 npm install -g taskcrew
 ```
 
-## 用法
+## Quick start
 
 ```bash
-taskcrew plan [board]       # PM 研究 codebase，把「規劃中」的卡產出做法
-taskcrew run  [board]       # 排空「待執行」欄
-taskcrew <cmd> --dry        # 只列出會做什麼，不實際執行
+# 1. Set up a board (once)
+backlog init my-board
+cd my-board
+
+# 2. Configure the nine-column workflow
+#    backlog/config.yml → statuses: [...]
+
+# 3. Write a card, drag it to 待執行 / Ready, then:
+taskcrew run
 ```
 
-兩個指令對應看板上兩段「球在 agent 手上」的區間。中間那段（設計待批准 → 待執行）
-是你的 —— 沒有指令，**你拖卡就是批准**。
+## How it works
 
-卡進了 queue **只是排隊，不會自己開始** —— 每次執行都是一次明確授權。
+taskcrew adds two commands to a Backlog.md board. Each covers one stretch where the ball is in the agents' court — the stretch between them is yours.
 
-結束條件只有兩個：queue 空了，或撞到訂閱額度。不設卡數、時間、花費上限。
+```
+Inbox → Discuss → Planning → Awaiting approval → Ready → Running → Report → Done
+                  └ plan ──┘                     └────────── run ─────────┘
+```
 
-## 卡片要寫什麼
+| Command | Moves cards | Who acts |
+|---|---|---|
+| `taskcrew plan` | Planning → Awaiting approval | **PM** researches the codebase, writes an implementation plan |
+| *(you drag the card)* | Awaiting approval → Ready | **You.** Dragging *is* the approval — there is no command |
+| `taskcrew run` | Ready → Report | The four-role pipeline builds it |
 
-Backlog.md 會在寫入時刪掉它不認識的 frontmatter 欄位，所以 taskcrew 的設定放在**內文區塊**：
+Cards in the queue **only queue**. Nothing starts until you issue a command — every run is an explicit authorization.
+
+### The pipeline
+
+```
+PM (opus/xhigh)        →  implementation plan  →  you approve
+    ↓
+junior RD (sonnet)     →  implement
+    ↓
+verify                 →  per-test results
+    ↓
+senior RD (opus/xhigh) →  reduction review
+    ↓
+verify                 →  confirm nothing broke
+    ↓
+QA (haiku)             →  does this meet the requirement?
+```
+
+Failure escalates through three loops, and **each step up changes something real** rather than retrying the same thing:
+
+| Loop | Problem | Response |
+|---|---|---|
+| Inner | The implementation is wrong | Senior takes over from junior (keeps their work — the approach was right) |
+| Middle | The approach is wrong | PM replans in a clean context; new attempt, new branch from `base_branch` |
+| Outer | The requirement is wrong | Stop. Hand the card back with everything it tried |
+
+## Design decisions
+
+**Intake is wide open; the gate is narrow.** Anyone can create a card — a chat session, a Discord bot, the web UI, a script you wrote. Quality is not protected by restricting who writes cards; it is protected by seven checks when a card enters the queue. The strictest one: **every acceptance criterion must reference an executable test case.**
+
+```markdown
+- [ ] Whitespace becomes a hyphen → `test/run.js::spaces-to-dashes`
+```
+
+A criterion you cannot back with a test isn't a criterion. It's a wish.
+
+**"Did it work" is mechanical; "is it good" is judgment.** `verify` must emit per-test results, not just an exit code — because comparing per-test results *across rounds* is the only objective way to tell "the implementation is wrong" from "the approach is wrong":
+
+| Across rounds | Diagnosis | Action |
+|---|---|---|
+| Failures decreasing | Converging | Stay in the inner loop |
+| Same tests failing, count unchanged | Stuck — this approach can't reach them | Escalate |
+| Fixed some, broke others | The approach is structurally wrong | Escalate |
+| Nearly everything failing from round 1 | Wrong direction | Escalate immediately |
+
+No agent is asked for an opinion here. Getting this wrong sends the whole effort down the wrong path, which makes it exactly the question you should never answer by feel.
+
+**Guardrails are mechanical, not requested.** Pushing, touching `main`, editing `.env`, restarting services — these are blocked with `--disallowed-tools`, not asked for politely in a prompt. An agent that misjudges still cannot do anything irreversible.
+
+**A card is only as large as one reviewable diff.** The bottleneck is your attention, not the machine's throughput. An oversized card doesn't go faster; it produces a diff you skim and rubber-stamp, which means you no longer have a review step.
+
+## Card format
+
+Backlog.md strips frontmatter keys it doesn't recognize, so taskcrew's settings live in a **body section**:
 
 ````markdown
 ## Runner Config
 
 <!-- RUNNER:BEGIN -->
 ```yaml
-project: ~/code/my-repo          # 目標 repo
-base_branch: main                # 分支從哪長出來
-verify: "npm test -- --json"     # 必須產出逐條結果
+project: ~/code/my-repo          # target repository
+base_branch: main                # where the branch grows from
+verify: "npm test -- --json"     # must emit per-test results
 autonomy: propose                # none | propose | replan:N | free
 ```
 <!-- RUNNER:END -->
 
 ## Description
 
-**要做什麼**
+**What to do**
 …
 
-**不要做什麼**                    ← 必填。無人看管時這段擋掉的災難最多
+**What NOT to do**               ← required; blocks more damage than any other field
 - …
 
 ## Acceptance Criteria
 
-- [ ] 空白轉成連字號 → `test/run.js::spaces-to-dashes`
+- [ ] Whitespace becomes a hyphen → `test/run.js::spaces-to-dashes`
 
 ## Implementation Plan
 
-（做法。這是你在「設計待批准」那一欄審查的對象）
+(Produced by PM. This is what you review in "Awaiting approval".)
 ````
+
+### `autonomy`
+
+What the pipeline may do when an approach fails:
+
+| Value | Behavior |
+|---|---|
+| `none` | Stop. Mark failed |
+| `propose` | PM writes a new plan to the card and sends it back for approval — **does not execute it** |
+| `replan:N` | PM replans and executes, up to N times |
+| `free` | Keep going until it passes or the subscription limit is hit |
+
+`propose` is the default. Even when it can't act, you wake up to the plan it would have tried — which is the raw material for deciding how much rope to give it next time.
+
+## Commands
+
+```bash
+taskcrew plan [board]     # PM produces implementation plans
+taskcrew run  [board]     # drain the Ready column
+taskcrew <cmd> --dry      # show what would happen, change nothing
+```
+
+A run ends for exactly two reasons: the queue is empty, or the subscription limit is reached. There is no card cap, time cap, or spend cap — **it only ever uses your subscription quota.**
 
 ## Roadmap
 
-| Phase | 內容 | |
+| Phase | | |
 |---|---|---|
-| 0 | Backlog.md 前提驗證 | ✅ |
-| 1 | 最小鏈路：讀卡 → RD → 驗收 → 寫回 | ✅ |
-| 2 | 四角產線與三層循環 | ✅ |
-| 3 | 常駐服務、Redis queue、Postgres 執行歷史 | |
-| 4 | 入口介面，讓 Discord / Telegram / API 接進來 | |
+| 0 | Backlog.md compatibility verified | ✅ |
+| 1 | Minimal chain: card → agent → verify → write back | ✅ |
+| 2 | Four-role pipeline, three-loop escalation | ✅ |
+| 3 | Resident service, Redis queue, Postgres execution history | |
+| 4 | Intake API for Discord / Telegram / custom clients | |
+
+## Development
+
+```bash
+npm test          # 38 tests; integration tests stub the agent for determinism
+```
+
+Control flow is pinned down with a fake `claude` binary — escalation logic can't be tested
+reliably against real agents, which behave differently every run. Real agents are reserved
+for what a stub can't verify: prompt quality.
 
 ## License
 
