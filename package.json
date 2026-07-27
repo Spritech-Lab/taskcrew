@@ -1,0 +1,19 @@
+{
+  "name": "taskcrew",
+  "version": "0.0.1",
+  "description": "Turn a Backlog.md board into an unattended multi-agent development pipeline, running on your own Claude subscription.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "taskcrew": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "yaml": "^2.7.0"
+  }
+}
