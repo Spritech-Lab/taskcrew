@@ -9,20 +9,28 @@ import type { Autonomy, Card, TestResult } from './types.ts'
 import { passed, summarize, verify } from './verify.ts'
 
 /**
- * 一張卡的完整產線。三層循環：
+ * 一張卡的完整產線。
  *
  *   內層 —— 實作沒寫對：junior 開發 → 測試 → senior 減法 → 測試 → QA
- *            沒過就由 senior 接手開發（保留 junior 的 code，路是對的）
- *   中層 —— 做法本身不對：PM 在乾淨 context 重新規劃，換一個方案
- *            新方案 = 新分支，從 base_branch 乾淨開始（路走錯了，code 一起丟）
+ *            沒過就由 senior 接手（保留 junior 的 code，路是對的）
+ *
+ *   中層 —— plan 有問題。兩個檔位，差別很大：
+ *            · 修正：結構對、細節錯（例如假設的檔案不存在）
+ *              同一條分支、同一個方案，只改細節，RD 接著做
+ *            · 換方案：結構就錯
+ *              新分支、從 base_branch 乾淨長出來，舊 code 一起丟
+ *
  *   外層 —— 需求或方向不對：停下來，把球交回給人
  *
- * 三層的成本與能力同時遞增，而且每次升級都**真的換了東西**，
- * 不是同一個東西再試一次。對應設計文件 §8.3。
+ * 「修正」這個檔位很重要：**多數失敗不是做法錯，是某個事實沒查證**。
+ * 為了一個錯的檔名就把整個方案丟掉重來，是很貴的過度反應。
  */
 
-/** 內層輪次上限。超過就代表這不是機器自己能解決的，該升級。 */
+/** 內層輪次上限。超過代表這不是機器自己能解決的實作問題。 */
 const MAX_ROUNDS = 2
+
+/** 同一個方案最多修正幾次。再多就代表問題不在細節，在結構。 */
+const MAX_REVISIONS = 2
 
 interface RoundRecord {
   no: number
@@ -35,6 +43,8 @@ interface RoundRecord {
 
 interface AttemptRecord {
   no: number
+  /** 這個方案的第幾版 plan。修正會 +1；換方案則 attempt 進位、版本歸 1 */
+  planVersion: number
   branch: string
   plan: string
   rounds: RoundRecord[]
@@ -50,10 +60,19 @@ interface AttemptRecord {
   cost: number
 }
 
+/** PM 看完失敗之後的決定 */
+export type PmDecision =
+  /** 結構對、細節錯 —— 同分支同方案，只換 plan */
+  | { kind: 'revise'; plan: string }
+  /** 結構就錯 —— 換一個真正不同的做法 */
+  | { kind: 'replace'; plan: string }
+  /** 問題不在 plan，而是需求或驗收條件本身有洞 —— 交回人 */
+  | { kind: 'handback'; reason: string }
+
 export type PipelineResult =
   | { kind: 'done'; attempts: AttemptRecord[]; costUsd: number }
   | { kind: 'failed'; attempts: AttemptRecord[]; costUsd: number; reason: string }
-  /** autonomy: propose —— PM 想出了新方案但不執行，卡退回「設計待批准」 */
+  /** autonomy: propose —— PM 要換方案但不執行，卡退回「設計待批准」 */
   | { kind: 'proposed'; attempts: AttemptRecord[]; costUsd: number; newPlan: string }
   | { kind: 'rate-limited'; attempts: AttemptRecord[]; costUsd: number }
 
@@ -79,7 +98,7 @@ export async function runPipeline(
   for (let attemptNo = 1; attemptNo <= maxAttempts; attemptNo++) {
     const branch = `task/${card.id.toLowerCase()}-attempt-${attemptNo}`
 
-    // 換方案 = 從 base_branch 乾淨長出來。上一個方案的 code 不繼承 ——
+    // 換方案 = 從 base_branch 乾淨長出來。舊方案的 code 不繼承 ——
     // 路走錯了，在爛攤子上改只會讓新方案變成舊方案的變體。
     const co = await git(repo, ['checkout', '-B', branch, cfg.base_branch])
     if (co.code !== 0) {
@@ -92,40 +111,89 @@ export async function runPipeline(
     }
     log(`   [方案 ${attemptNo}] 分支 ${branch}`)
 
-    const attempt = await runAttempt(card, repo, branch, plan, attemptNo, log)
-    attempts.push(attempt)
-    cost += attempt.cost
+    // ── 修正迴圈：同一個方案、同一條分支，只換 plan ──
+    let planVersion = 1
+    let pendingReplacement = ''
 
-    if (attempt.ended === 'passed') {
-      await commit(repo, card)
-      await writeNotes(card, attempts)
-      return { kind: 'done', attempts, costUsd: cost }
+    while (true) {
+      const attempt = await runAttempt(card, repo, branch, plan, attemptNo, planVersion, log)
+      attempts.push(attempt)
+      cost += attempt.cost
+
+      if (attempt.ended === 'passed') {
+        await commit(repo, card)
+        await writeNotes(card, attempts)
+        return { kind: 'done', attempts, costUsd: cost }
+      }
+      if (attempt.ended === 'blocked' || attempt.ended === 'error') {
+        await writeNotes(card, attempts)
+        return { kind: 'failed', attempts, costUsd: cost, reason: attempt.reason }
+      }
+
+      // 修正次數用完就不再問「該修還是該換」—— 改到第三版還不行，問題就不在細節
+      if (planVersion > MAX_REVISIONS) {
+        log(`   [方案 ${attemptNo}] 修正 ${MAX_REVISIONS} 次仍未通過 → 改為換方案`)
+        break
+      }
+
+      const pm = await askPm(card, attempt, excluded, repo, 'decide')
+      cost += pm.cost
+      if (pm.rateLimited) return { kind: 'rate-limited', attempts, costUsd: cost }
+      if (!pm.decision) {
+        await writeNotes(card, attempts)
+        return { kind: 'failed', attempts, costUsd: cost, reason: 'PM 沒有給出可解析的決定' }
+      }
+
+      if (pm.decision.kind === 'handback') {
+        // 交回人的理由是最該留在卡上的東西 —— 它說的是「需求本身有洞」，
+        // 而那是只有你能修的，不是下次再跑一遍就會好的。
+        await writeNotes(
+          card,
+          attempts,
+          `**PM 交回人**\n\n${pm.decision.reason}\n\n換方案解決不了這個問題，需要你確認需求或驗收條件。`,
+        )
+        return {
+          kind: 'failed',
+          attempts,
+          costUsd: cost,
+          reason: `PM 交回人：${pm.decision.reason}`,
+        }
+      }
+
+      if (pm.decision.kind === 'replace') {
+        pendingReplacement = pm.decision.plan
+        break
+      }
+
+      // 修正：同分支、同 attempt，只有 plan 進版
+      planVersion++
+      plan = pm.decision.plan
+      await upsertSection(card, 'Implementation Plan', plan)
+      log(`   [方案 ${attemptNo}] PM 修正 plan（v${planVersion}）→ 同一條分支接著做`)
     }
 
-    if (attempt.ended === 'blocked' || attempt.ended === 'error') {
-      await writeNotes(card, attempts)
-      return { kind: 'failed', attempts, costUsd: cost, reason: attempt.reason }
-    }
-
-    // 走到這裡代表要換方案。先看 autonomy 允不允許。
-    excluded.push(formatExcluded(attempt))
+    // ── 走到這裡代表要換方案 ──
+    excluded.push(formatExcluded(attempts[attempts.length - 1]))
     await appendExcluded(card, excluded)
 
     if (attemptNo >= maxAttempts) break
 
-    log(`   [方案 ${attemptNo}] ${attempt.reason} → 交回 PM 重新規劃`)
-    const replan = await invoke(PM, replanPrompt(card, attempt, excluded), { cwd: repo })
-    cost += replan.costUsd ?? 0
-    if (isRateLimited(replan)) return { kind: 'rate-limited', attempts, costUsd: cost }
-    if (!replan.ok || !replan.text.trim()) {
-      await writeNotes(card, attempts)
-      return { kind: 'failed', attempts, costUsd: cost, reason: 'PM 無法產出新方案' }
+    if (!pendingReplacement.trim()) {
+      // 「修正次數用完」那條路徑還沒拿到新 plan，這裡才去要
+      const pm = await askPm(card, attempts[attempts.length - 1], excluded, repo, 'force-replace')
+      cost += pm.cost
+      if (pm.rateLimited) return { kind: 'rate-limited', attempts, costUsd: cost }
+      if (!pm.decision || pm.decision.kind === 'handback') {
+        await writeNotes(card, attempts)
+        return { kind: 'failed', attempts, costUsd: cost, reason: 'PM 無法產出新方案' }
+      }
+      pendingReplacement = pm.decision.plan
     }
+    plan = pendingReplacement
+    log(`   [方案 ${attemptNo}] → 換方案`)
 
-    plan = stripLeadingHeading(replan.text, 'Implementation Plan')
-
-    // autonomy: propose —— 想得出新方案，但不准自己執行。
-    // 這是預設值：就算不放行，早上你也會看到它想出的方案，那本身就是磨合的素材。
+    // autonomy: propose —— 換方案改變的是「你批准過的做法」，所以要重新批准。
+    // 修正不受此限：它只補細節，你批准的做法本身沒變。
     if (cfg.autonomy.kind === 'propose') {
       await upsertSection(card, 'Implementation Plan', plan)
       await writeNotes(card, attempts)
@@ -143,18 +211,21 @@ export async function runPipeline(
   }
 }
 
-/** 一個方案的內層循環：最多 MAX_ROUNDS 輪。 */
+/** 一個 plan 版本的內層循環：最多 MAX_ROUNDS 輪。 */
 async function runAttempt(
   card: Card,
   repo: string,
   branch: string,
   plan: string,
   attemptNo: number,
+  planVersion: number,
   log: (l: string) => void,
 ): Promise<AttemptRecord> {
   const cfg = card.runner!
+  const tag = planVersion === 1 ? `方案 ${attemptNo}` : `方案 ${attemptNo}·v${planVersion}`
   const rec: AttemptRecord = {
     no: attemptNo,
+    planVersion,
     branch,
     plan,
     rounds: [],
@@ -176,7 +247,7 @@ async function runAttempt(
     }
     rec.rounds.push(round)
 
-    log(`   [方案 ${attemptNo}·輪 ${roundNo}] ${dev.role} 開發（${dev.model} / ${dev.effort}）`)
+    log(`   [${tag}·輪 ${roundNo}] ${dev.role} 開發（${dev.model} / ${dev.effort}）`)
     const devResult = await invoke(
       dev,
       isFirst ? devPrompt(card, plan) : takeoverPrompt(card, plan, rec),
@@ -196,8 +267,8 @@ async function runAttempt(
       return rec
     }
 
-    // RD 主動宣告方案不可行 —— 最快、最有價值的升級訊號。
-    // 不用等輪次跑完，也不用等測試。
+    // RD 主動宣告方案不可行 —— 最快、最有價值的訊號，而且它通常帶著
+    // 具體原因（檔案不存在、API 沒那個參數）。那種問題該用「修正」解決。
     const infeasible = firstLine(devResult.text, 'PLAN_INFEASIBLE')
     if (infeasible) {
       rec.ended = 'infeasible'
@@ -211,15 +282,14 @@ async function runAttempt(
       return rec
     }
 
-    // 先確認它能動
     let v = await verify(cfg.verify, repo)
     round.results = v.results
     round.verifySummary = summarize(v)
-    log(`   [方案 ${attemptNo}·輪 ${roundNo}] 驗收 ${round.verifySummary}`)
+    log(`   [${tag}·輪 ${roundNo}] 驗收 ${round.verifySummary}`)
 
     // 減法只在第一輪做 —— 第二輪的開發者就是 senior，他寫的時候已經在減了。
     if (isFirst && passed(v)) {
-      log(`   [方案 ${attemptNo}·輪 ${roundNo}] senior 減法 review`)
+      log(`   [${tag}·輪 ${roundNo}] senior 減法 review`)
       const reduce = await invoke(SENIOR_RD, reducePrompt(card, plan), { cwd: repo })
       round.cost += reduce.costUsd ?? 0
       rec.cost += reduce.costUsd ?? 0
@@ -232,14 +302,13 @@ async function runAttempt(
       v = await verify(cfg.verify, repo)
       round.results = v.results
       round.verifySummary = summarize(v)
-      log(`   [方案 ${attemptNo}·輪 ${roundNo}] 減法後驗收 ${round.verifySummary}`)
+      log(`   [${tag}·輪 ${roundNo}] 減法後驗收 ${round.verifySummary}`)
     }
 
     const shape = analyze(rec.rounds.map((r) => r.results))
 
     if (passed(v)) {
-      // 測試過了才問 QA。QA 回答的是測試回答不了的那個問題：符不符合要求。
-      log(`   [方案 ${attemptNo}·輪 ${roundNo}] QA 判定`)
+      log(`   [${tag}·輪 ${roundNo}] QA 判定`)
       const qaResult = await invoke(QA, qaPrompt(card, plan, v.results), { cwd: repo })
       round.cost += qaResult.costUsd ?? 0
       rec.cost += qaResult.costUsd ?? 0
@@ -261,17 +330,16 @@ async function runAttempt(
         rec.reason = `QA 判定方案不足：${verdict.detail}`
         return rec
       }
-      log(`   [方案 ${attemptNo}·輪 ${roundNo}] QA 退回：${describeVerdict(verdict)}`)
+      log(`   [${tag}·輪 ${roundNo}] QA 退回：${describeVerdict(verdict)}`)
       continue
     }
 
-    // 測試沒過。形狀說了算 —— 該留內層修，還是這個方案根本碰不到那些條件。
     if (shouldEscalate(shape)) {
       rec.ended = 'shape'
       rec.reason = describe(shape)
       return rec
     }
-    log(`   [方案 ${attemptNo}·輪 ${roundNo}] ${describe(shape)} → 留內層`)
+    log(`   [${tag}·輪 ${roundNo}] ${describe(shape)} → 留內層`)
   }
 
   rec.ended = 'rounds-exhausted'
@@ -279,21 +347,51 @@ async function runAttempt(
   return rec
 }
 
-// ── autonomy ────────────────────────────────────────────────────────────
+// ── PM：修正、換方案，還是交回人 ────────────────────────────────────────
 
-function attemptBudget(a: Autonomy): number {
-  switch (a.kind) {
-    case 'none':
-      return 1
-    case 'propose':
-      // 跑一個方案；失敗後 PM 產新方案但不執行，卡退回等你批准
-      return 2
-    case 'replan':
-      return a.max + 1
-    case 'free':
-      // 沒有次數上限，實際的煞車是訂閱額度
-      return Number.MAX_SAFE_INTEGER
+async function askPm(
+  card: Card,
+  failed: AttemptRecord,
+  excluded: readonly string[],
+  repo: string,
+  mode: 'decide' | 'force-replace',
+): Promise<{ decision: PmDecision | null; cost: number; rateLimited: boolean }> {
+  const r = await invoke(PM, pmPrompt(card, failed, excluded, mode), { cwd: repo })
+  const cost = r.costUsd ?? 0
+  if (isRateLimited(r)) return { decision: null, cost, rateLimited: true }
+  if (!r.ok) return { decision: null, cost, rateLimited: false }
+  return { decision: parsePmDecision(r.text, mode), cost, rateLimited: false }
+}
+
+/**
+ * PM 必須在第一行明說走哪一條 —— 兩條路在分支與 code 的處理上完全相反，
+ * 猜錯的代價是把一份大致正確的方案連同它的成果一起丟掉。
+ */
+export function parsePmDecision(
+  text: string,
+  mode: 'decide' | 'force-replace' = 'decide',
+): PmDecision | null {
+  const trimmed = text.trim()
+  if (!trimmed) return null
+
+  const m = /^[*#>\-\s]*(REVISE|REPLACE|HANDBACK)\s*[:：]?[ \t]*(.*)$/im.exec(trimmed)
+  if (!m) {
+    // force-replace 模式下 PM 只要吐 plan，不需要標頭
+    return mode === 'force-replace'
+      ? { kind: 'replace', plan: stripLeadingHeading(trimmed, 'Implementation Plan') }
+      : null
   }
+
+  const keyword = m[1].toUpperCase()
+  if (keyword === 'HANDBACK') {
+    return { kind: 'handback', reason: (m[2] || '').trim() || '（未說明）' }
+  }
+
+  // 標頭之後的所有內容就是 plan（標頭同一行的殘餘也算進去）
+  const after = trimmed.slice(m.index + m[0].length)
+  const plan = stripLeadingHeading(`${(m[2] || '').trim()}\n${after}`.trim(), 'Implementation Plan')
+  if (!plan) return null
+  return keyword === 'REVISE' ? { kind: 'revise', plan } : { kind: 'replace', plan }
 }
 
 // ── prompts ─────────────────────────────────────────────────────────────
@@ -384,12 +482,17 @@ function qaPrompt(card: Card, plan: string, results: TestResult[] | null): strin
   ].join('\n')
 }
 
-function replanPrompt(card: Card, failed: AttemptRecord, excluded: string[]): string {
+function pmPrompt(
+  card: Card,
+  failed: AttemptRecord,
+  excluded: readonly string[],
+  mode: 'decide' | 'force-replace',
+): string {
   const rounds = failed.rounds
     .map((r) => {
       const fails = r.results?.filter((x) => !x.passed).map((x) => x.name) ?? []
       return [
-        `輪 ${r.no}（${r.role}）：${r.verifySummary}`,
+        `輪 ${r.no}（${r.role}）：${r.verifySummary || '未跑到驗收'}`,
         fails.length ? `  沒過：${fails.join('、')}` : null,
         r.qa ? `  QA：${describeVerdict(r.qa)}` : null,
       ]
@@ -398,10 +501,37 @@ function replanPrompt(card: Card, failed: AttemptRecord, excluded: string[]): st
     })
     .join('\n')
 
+  const head =
+    mode === 'force-replace'
+      ? [
+          `## 換方案：${card.title}`,
+          '',
+          '這個方案已經修正過多次仍不通過，代表問題不在細節而在結構。',
+          '請直接輸出一個**真正不同**的做法（markdown），不要加前言、不要加標頭。',
+        ]
+      : [
+          `## 這個方案沒通過：${card.title}`,
+          '',
+          '判斷問題出在哪一層。**第一行必須是下列三者之一**：',
+          '',
+          '`REVISE:` —— **結構是對的，只是某個細節錯了。**',
+          '  典型情況：假設的檔案不存在、API 沒有那個參數、漏掉一個步驟、',
+          '  某個事實當初沒查證清楚。這條路會保留現有分支與成果，RD 接著做。',
+          '  標頭之後直接接**修正過的完整 plan**。',
+          '',
+          '`REPLACE:` —— **做法本身錯了**，細節怎麼補都到不了。',
+          '  這條路會丟掉現有的 code，從頭來過。',
+          '  標頭之後直接接一個**真正不同**的做法，不是原方案的變體。',
+          '',
+          '`HANDBACK:` —— **問題不在 plan**，是需求或驗收條件本身有洞。',
+          '  標頭之後說明你需要人確認什麼。換多少方案都解不了的情況請選這個。',
+          '',
+          '**先看失敗的性質再決定。多數失敗是某個事實沒查證，不是做法錯** ——',
+          '為了一個錯的檔名就把整個方案連同已完成的工作一起丟掉，是很貴的過度反應。',
+        ]
+
   return [
-    `## 重新規劃：${card.title}`,
-    '',
-    '上一個方案失敗了。你的工作是想出一個**真正不同**的做法 —— 不是上一個方案的變體。',
+    ...head,
     '',
     '### 需求',
     section(card, 'Description'),
@@ -409,19 +539,16 @@ function replanPrompt(card: Card, failed: AttemptRecord, excluded: string[]): st
     '### 驗收條件',
     section(card, 'Acceptance Criteria'),
     '',
-    '### 上一個方案',
+    `### 目前的做法（第 ${failed.planVersion} 版）`,
     failed.plan,
     '',
-    '### 它為什麼失敗',
+    '### 它為什麼沒通過',
     `判定：${failed.reason}`,
     '',
     rounds,
-    '',
-    '### 已排除的方案 —— 不要再提這些',
-    excluded.join('\n\n'),
-    '',
-    '請直接輸出新的 Implementation Plan 本身（markdown），不要加前言或說明。',
-    '要具體到 RD 拿了就能動手，但不要幫他把 code 寫出來。',
+    ...(excluded.length
+      ? ['', '### 已排除的方案 —— 不要再提這些', excluded.join('\n\n')]
+      : []),
   ].join('\n')
 }
 
@@ -436,6 +563,7 @@ function formatExcluded(a: AttemptRecord): string {
   return [
     `### 方案 ${a.no}（attempt-${a.no}，已排除）`,
     `**為什麼不行**：${a.reason}${fails ? `（過不了：${fails}）` : ''}`,
+    a.planVersion > 1 ? `**修正過 ${a.planVersion - 1} 次仍不通過**` : null,
     `**分支**：\`${a.branch}\``,
     '',
     '<details><summary>當時的做法</summary>',
@@ -443,31 +571,41 @@ function formatExcluded(a: AttemptRecord): string {
     a.plan,
     '',
     '</details>',
-  ].join('\n')
+  ]
+    .filter((l) => l !== null)
+    .join('\n')
 }
 
-/** 排除清單累積，不覆蓋 —— 它是 PM 換方案的依據，也是人判斷要不要繼續放手的材料。 */
-async function appendExcluded(card: Card, excluded: string[]): Promise<void> {
+/**
+ * 排除清單只記**換掉的方案**，不記修正。
+ * 把每次微調都塞進來，PM 下次讀它時反而找不到重點。
+ */
+async function appendExcluded(card: Card, excluded: readonly string[]): Promise<void> {
   await upsertSection(card, 'Excluded Approaches', excluded.join('\n\n'))
 }
 
-async function writeNotes(card: Card, attempts: readonly AttemptRecord[]): Promise<void> {
+async function writeNotes(
+  card: Card,
+  attempts: readonly AttemptRecord[],
+  extra?: string,
+): Promise<void> {
   const blocks = attempts.map((a) => {
+    const label = a.planVersion === 1 ? `方案 ${a.no}` : `方案 ${a.no} · plan v${a.planVersion}`
     const lines = [
-      `**方案 ${a.no}（attempt-${a.no}）· ${endedLabel(a.ended)}**`,
+      `**${label}（attempt-${a.no}）· ${endedLabel(a.ended)}**`,
       '',
       `- 分支：\`${a.branch}\``,
       `- 判定：${a.reason}`,
     ]
     for (const r of a.rounds) {
       lines.push(`- 輪 ${r.no}（${r.role}）：${r.verifySummary || '未跑到驗收'}`)
-      const fails = r.results?.filter((x) => !x.passed) ?? []
-      for (const f of fails) lines.push(`  - ✗ ${f.name}`)
+      for (const f of r.results?.filter((x) => !x.passed) ?? []) lines.push(`  - ✗ ${f.name}`)
       if (r.qa && r.qa.kind !== 'pass') lines.push(`  - QA：${describeVerdict(r.qa)}`)
     }
     lines.push(`- 花費：${a.cost ? `$${a.cost.toFixed(2)}` : '未取得'}`)
     return lines.join('\n')
   })
+  if (extra) blocks.push(extra)
   await upsertSection(card, 'Implementation Notes', blocks.join('\n\n'))
 }
 
@@ -490,6 +628,23 @@ function endedLabel(e: AttemptRecord['ended']): string {
   }
 }
 
+// ── autonomy ────────────────────────────────────────────────────────────
+
+function attemptBudget(a: Autonomy): number {
+  switch (a.kind) {
+    case 'none':
+      return 1
+    case 'propose':
+      // 跑一個方案；要**換方案**時 PM 產出但不執行，卡退回等你批准。
+      // 修正不受影響 —— 它只補細節，你批准的做法本身沒變。
+      return 2
+    case 'replan':
+      return a.max + 1
+    case 'free':
+      return Number.MAX_SAFE_INTEGER
+  }
+}
+
 async function commit(repo: string, card: Card): Promise<void> {
   // 驗收與 QA 都過了才 commit，而且只在本機。push 已被 --disallowed-tools 擋死。
   await git(repo, ['add', '-A'])
@@ -503,8 +658,6 @@ async function commit(repo: string, card: Card): Promise<void> {
     `${card.id}: ${card.title}`,
   ])
 }
-
-// ── 小工具 ───────────────────────────────────────────────────────────────
 
 function section(card: Card, name: string): string {
   return (card.sections[name] ?? '').replace(/<!--[\s\S]*?-->/g, '').trim() || '（無）'

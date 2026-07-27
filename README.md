@@ -81,9 +81,14 @@ Failure escalates through three loops, and **each step up changes something real
 
 | Loop | Problem | Response |
 |---|---|---|
-| Inner | The implementation is wrong | Senior takes over from junior (keeps their work — the approach was right) |
-| Middle | The approach is wrong | PM replans in a clean context; new attempt, new branch from `base_branch` |
-| Outer | The requirement is wrong | Stop. Hand the card back with everything it tried |
+| Inner | The implementation is wrong | Senior takes over from junior — keeps their work, the approach was right |
+| Middle · **revise** | A **detail** is wrong (a file that doesn't exist, a missing step) | Same branch, same work; only the plan is corrected |
+| Middle · **replace** | The **approach** is wrong | New attempt, new branch from `base_branch`; the old code is discarded |
+| Outer | The **requirement** is wrong | Stop. Hand the card back with everything it tried |
+
+The revise tier matters more than it looks: **most failures are an unverified fact, not a wrong approach.**
+Throwing away a working branch because one filename was wrong is an expensive overreaction.
+PM decides which tier applies and must say so explicitly — the two paths treat the branch in opposite ways.
 
 ## Design decisions
 

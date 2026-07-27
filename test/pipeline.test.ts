@@ -72,7 +72,7 @@ test('同一批測試一直掛 → stuck → PM 換方案 → 新分支從頭來
     steps: [
       writes('axx'), // 方案1 輪1 junior
       writes('axx'), // 方案1 輪2 senior —— 失敗集合沒動 = stuck
-      says('新的做法：換個方式'), // PM 換方案
+      says('REPLACE:\n\n新的做法：換個方式'), // PM 判定結構有問題
       writes('aaa'), // 方案2 輪1 junior
       says('減完了'), // senior 減法
       says('符合要求'), // QA
@@ -89,7 +89,7 @@ test('同一批測試一直掛 → stuck → PM 換方案 → 新分支從頭來
   assert.match(excluded, /方案 1/)
   assert.match(excluded, /同一批/, '升級理由要是 stuck 形狀')
   assert.doesNotMatch(excluded, /輪次用盡/, '不該是靠跑完輪次才換方案')
-  assert.match(log, /→ 交回 PM 重新規劃/)
+  assert.match(log, /→ 換方案/)
 
   // 換方案 = 新分支，而且從 base_branch 乾淨長出來
   const branches = await run('git', ['branch', '--format=%(refname:short)'], { cwd: fx.repoDir })
@@ -102,7 +102,7 @@ test('autonomy: propose —— PM 想得出新方案，但不准自己執行', a
     files: { pattern: 'xxx' },
     verify: VERIFY,
     autonomy: 'propose',
-    steps: [writes('axx'), writes('axx'), says('這次改用另一種做法')],
+    steps: [writes('axx'), writes('axx'), says('REPLACE:\n\n這次改用另一種做法')],
   })
 
   assert.equal(summary.proposed, 1)
@@ -221,4 +221,107 @@ test('未通過就不 commit —— 分支上留著工作區改動，但沒有 c
 
   // 但改動留著，人可以去看它做到哪
   assert.equal((await readFile(`${fx.repoDir}/pattern`, 'utf8')).trim(), 'axx')
+})
+
+// ── 修正 vs 換方案 ──────────────────────────────────────────────────────
+//
+// 這兩條路對分支的處理完全相反，猜錯的代價是把一份大致正確的方案
+// 連同它的成果一起丟掉。所以要分別釘死。
+
+test('PM 判定 REVISE：同一條分支接著做，不丟成果', async () => {
+  const { fx, summary, log } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    steps: [
+      writes('axx'), // 輪1 junior
+      writes('axx'), // 輪2 senior → stuck
+      says('REVISE:\n\n細節修正：檔名應該是 pattern'), // PM 說只是細節錯
+      writes('aaa'), // v2 輪1 junior
+      says('減完了'),
+      says('符合要求'),
+    ],
+  })
+
+  assert.equal(summary.done, 1)
+  assert.match(log, /PM 修正 plan（v2）/)
+
+  // 關鍵：修正不開新分支
+  const branches = await run('git', ['branch', '--format=%(refname:short)'], { cwd: fx.repoDir })
+  assert.match(branches.stdout, /task-1-attempt-1/)
+  assert.doesNotMatch(branches.stdout, /attempt-2/, '修正不該開新分支')
+
+  const card = await readCard(fx.cardPath)
+  // 修正不進排除清單 —— 那份清單是給 PM 換方案時看的，塞滿微調就找不到重點
+  assert.equal(card.sections['Excluded Approaches'], undefined)
+  // 但 plan 要被更新
+  assert.match(card.sections['Implementation Plan'] ?? '', /細節修正/)
+})
+
+test('PM 判定 REPLACE：開新分支，舊 code 丟掉', async () => {
+  const { fx, summary } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    autonomy: 'replan:1',
+    steps: [
+      writes('axx'),
+      writes('axx'),
+      says('REPLACE:\n\n結構就錯了，換一個做法'),
+      writes('aaa'),
+      says('減完了'),
+      says('符合要求'),
+    ],
+  })
+
+  assert.equal(summary.done, 1)
+  const branches = await run('git', ['branch', '--format=%(refname:short)'], { cwd: fx.repoDir })
+  assert.match(branches.stdout, /attempt-2/, '換方案要開新分支')
+
+  const card = await readCard(fx.cardPath)
+  assert.match(card.sections['Excluded Approaches'] ?? '', /方案 1/)
+})
+
+test('PM 判定 HANDBACK：不換方案，直接交回人', async () => {
+  const { fx, summary } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    autonomy: 'replan:2',
+    steps: [
+      writes('axx'),
+      writes('axx'),
+      says('HANDBACK: 驗收條件第 2 與第 3 條互相矛盾'),
+    ],
+  })
+
+  assert.equal(summary.failed, 1)
+  assert.equal(summary.done, 0)
+  // 交回人就停，不該再燒錢換方案
+  assert.equal((await fx.calls()).length, 3)
+  assert.match((await readCard(fx.cardPath)).sections['Implementation Notes'] ?? '', /交回人/)
+})
+
+test('修正次數用完 → 自動改為換方案，不會無限修下去', async () => {
+  const { summary, log } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    steps: [
+      writes('axx'), writes('axx'), says('REVISE:\n\n第一次修正'),
+      writes('axx'), writes('axx'), says('REVISE:\n\n第二次修正'),
+      writes('axx'), writes('axx'),
+      // 到這裡 planVersion=3 > MAX_REVISIONS=2，不會再問 PM
+    ],
+  })
+
+  assert.equal(summary.failed, 1)
+  assert.match(log, /修正 2 次仍未通過 → 改為換方案/)
+})
+
+test('PM 回覆無法解析 → 失敗並說明，不亂猜一個決定', async () => {
+  const { summary, log } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    steps: [writes('axx'), writes('axx'), says('嗯我覺得可以再試試看')],
+  })
+
+  assert.equal(summary.failed, 1)
+  assert.match(log, /沒有給出可解析的決定/)
 })
