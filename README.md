@@ -19,8 +19,8 @@ $ taskcrew run
    ✓ passed (1 attempt, $0.19)
 ```
 
-> **Status: early.** The pipeline works end to end and is covered by 38 tests, but the
-> resident service, Redis queue, and multi-channel intake are not built yet. See [Roadmap](#roadmap).
+> **Status: early.** The pipeline works end to end and is covered by 49 tests, but the
+> resident service and multi-channel intake are not built yet. See [Roadmap](#roadmap).
 
 ## Install
 
@@ -155,7 +155,7 @@ What the pipeline may do when an approach fails:
 | Value | Behavior |
 |---|---|
 | `none` | Stop. Mark failed |
-| `propose` | PM writes a new plan to the card and sends it back for approval — **does not execute it** |
+| `propose` | A **replacement** plan is written to the card and sent back for approval — not executed. **Revisions are unaffected**: they only correct a detail, so the approach you approved hasn't changed |
 | `replan:N` | PM replans and executes, up to N times |
 | `free` | Keep going until it passes or the subscription limit is hit |
 
@@ -178,13 +178,14 @@ A run ends for exactly two reasons: the queue is empty, or the subscription limi
 | 0 | Backlog.md compatibility verified | ✅ |
 | 1 | Minimal chain: card → agent → verify → write back | ✅ |
 | 2 | Four-role pipeline, three-loop escalation | ✅ |
-| 3 | Resident service, Redis queue, Postgres execution history | |
+| 3 | Resident service, Postgres execution history | |
+| — | *Redis is deferred until resident agents actually need to message each other* | |
 | 4 | Intake API for Discord / Telegram / custom clients | |
 
 ## Development
 
 ```bash
-npm test          # 38 tests; integration tests stub the agent for determinism
+npm test          # 49 tests; integration tests stub the agent for determinism
 ```
 
 Control flow is pinned down with a fake `claude` binary — escalation logic can't be tested
