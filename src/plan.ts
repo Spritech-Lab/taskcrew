@@ -1,4 +1,4 @@
-import { listCards, setStatus, stripLeadingHeading, upsertSection } from './board.ts'
+import { listCards, setStatus, stripLeadingHeading, upsertSection, byBoardOrder } from './board.ts'
 import { isRateLimited } from './claude.ts'
 import { expandHome, notReady } from './gate.ts'
 import type { Dispatcher } from './dispatch.ts'
@@ -39,7 +39,7 @@ export async function planAll(opts: PlanOptions): Promise<PlanSummary> {
   const all = await listCards(opts.boardDir)
   const pending = all
     .filter((c) => c.status === STATUS.規劃中)
-    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
+    .sort(byBoardOrder)
 
   if (pending.length === 0) {
     log('「規劃中」沒有卡。')

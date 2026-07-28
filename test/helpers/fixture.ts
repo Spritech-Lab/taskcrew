@@ -43,6 +43,8 @@ export interface FixtureOptions {
   status?: string
   /** 主卡的 require_review */
   requireReview?: boolean
+  /** 主卡的 ordinal */
+  ordinal?: number
   /** 覆寫卡片的內文區塊 */
   sections?: Partial<Record<'Description' | 'Acceptance Criteria' | 'Implementation Plan', string>>
   /** board 層的 agent 定義覆寫。key 是檔名，例如 'qa.md' */
@@ -60,6 +62,8 @@ export interface FixtureOptions {
     /** 下游要等人親自驗過 */
     requireReview?: boolean
     dependencies?: string[]
+    /** 看板上的排序位置（web UI 拖卡改的就是這個） */
+    ordinal?: number
   }[]
   dependencies?: string[]
 }
@@ -115,6 +119,7 @@ export async function makeFixture(o: FixtureOptions): Promise<Fixture> {
       verify: o.verify,
       autonomy: o.autonomy ?? 'none',
       requireReview: o.requireReview,
+      ordinal: o.ordinal,
       sections: o.sections ?? {},
     }),
     'utf8',
@@ -142,6 +147,7 @@ export async function makeFixture(o: FixtureOptions): Promise<Fixture> {
           autonomy: 'none',
           parent: extra.parent,
           requireReview: extra.requireReview,
+          ordinal: extra.ordinal,
           sections: extra.ac ? { 'Acceptance Criteria': extra.ac } : {},
         })
       : head
@@ -202,6 +208,7 @@ function card(o: {
   autonomy: string
   parent?: string
   requireReview?: boolean
+  ordinal?: number
   sections: Partial<Record<string, string>>
 }): string {
   const deps = o.dependencies.length ? `\n${o.dependencies.map((d) => `  - ${d}`).join('\n')}` : ' []'
@@ -210,7 +217,7 @@ id: ${o.id}
 title: t
 status: ${o.status}
 labels: []
-dependencies:${deps}${o.parent ? `\nparent_task_id: ${o.parent}` : ''}
+dependencies:${deps}${o.parent ? `\nparent_task_id: ${o.parent}` : ''}${o.ordinal !== undefined ? `\nordinal: ${o.ordinal}` : ''}
 ---
 
 ## Runner Config

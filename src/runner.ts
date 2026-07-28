@@ -1,4 +1,4 @@
-import { listCards, setStatus } from './board.ts'
+import { listCards, setStatus, byBoardOrder } from './board.ts'
 import type { Dispatcher } from './dispatch.ts'
 import { expandHome } from './gate.ts'
 import { checkGate } from './gate.ts'
@@ -49,7 +49,7 @@ export async function drain(opts: DrainOptions): Promise<DrainSummary> {
   const all = await listCards(opts.boardDir)
   const queue = all
     .filter((c) => c.status === STATUS.待執行)
-    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
+    .sort(byBoardOrder)
 
   if (queue.length === 0) {
     d.emit({ type: 'queue-empty' })

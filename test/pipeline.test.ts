@@ -806,3 +806,32 @@ test('父卡有兩張以上子卡時，每一張的成果都要合進來', async
     assert.equal(r.code, 0, `${f} 要在父卡的成果裡`)
   }
 })
+
+// ── 執行順序 ────────────────────────────────────────────────────────────
+
+test('排空的順序照看板，不照卡片 ID', async () => {
+  // 你在 web UI 上把 TASK-2 拖到 TASK-1 前面 —— 那就是把它的 ordinal 調小。
+  // 不照 ordinal 排的話，你的操作會被默默忽略：介面讓你以為控制得了，實際沒有。
+  const fx = await makeFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    ordinal: 2000, // TASK-1 被拖到後面
+    extraCards: [{ id: 'TASK-2', status: '待執行', repo: true, ordinal: 1000 }],
+    steps: [
+      writes('aaa'), says('減完了'), says('符合要求'),
+      writes('aaa'), says('減完了'), says('符合要求'),
+    ],
+  })
+
+  const seen: string[] = []
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  const orig = d.emit.bind(d)
+  d.emit = (e: any) => {
+    if (e.type === 'card-start') seen.push(e.card)
+    return orig(e)
+  }
+
+  const s = await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+  assert.equal(s.done, 2)
+  assert.deepEqual(seen, ['TASK-2', 'TASK-1'], '被拖到前面的卡要先跑')
+})

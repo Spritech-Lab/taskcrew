@@ -68,3 +68,34 @@ repo 只有兩個檔案
   // 但真正的下一個區塊仍要被正確切出來
   assert.match(card.sections['Acceptance Criteria'] ?? '', /一條/)
 })
+
+// ── 看板順序 ────────────────────────────────────────────────────────────
+
+test('照 ordinal 排，不照 ID —— 你在 UI 上拖卡改的就是 ordinal', async () => {
+  const { byBoardOrder } = await import('../src/board.ts')
+  const card = (id: string, ordinal?: number) => ({ id, ordinal }) as any
+
+  // TASK-3 被拖到最前面。照 ID 排的話它會排最後 —— 那就等於忽略你的操作。
+  const sorted = [card('TASK-1', 2000), card('TASK-2', 3000), card('TASK-3', 1000)]
+    .sort(byBoardOrder)
+    .map((c) => c.id)
+  assert.deepEqual(sorted, ['TASK-3', 'TASK-1', 'TASK-2'])
+})
+
+test('沒有 ordinal 的卡排最後，同順位再比 ID', async () => {
+  const { byBoardOrder } = await import('../src/board.ts')
+  const card = (id: string, ordinal?: number) => ({ id, ordinal }) as any
+
+  const sorted = [card('TASK-9'), card('TASK-2', 1000), card('TASK-1')]
+    .sort(byBoardOrder)
+    .map((c) => c.id)
+  assert.deepEqual(sorted, ['TASK-2', 'TASK-1', 'TASK-9'], '手寫的卡可能沒這個欄位')
+})
+
+test('ordinal 相同時用數字語意比 ID，不是字串比較', async () => {
+  const { byBoardOrder } = await import('../src/board.ts')
+  const card = (id: string, ordinal?: number) => ({ id, ordinal }) as any
+
+  const sorted = [card('TASK-10', 1000), card('TASK-2', 1000)].sort(byBoardOrder).map((c) => c.id)
+  assert.deepEqual(sorted, ['TASK-2', 'TASK-10'], '字串比較會把 TASK-10 排在 TASK-2 前面')
+})

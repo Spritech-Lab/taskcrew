@@ -66,6 +66,14 @@ export interface Card {
   labels: string[]
   dependencies: string[]
   parentTaskId?: string
+  /**
+   * 看板上的排序位置。**這就是你在 web UI 上拖卡時在改的東西。**
+   *
+   * Backlog.md 自動配（1000、2000…），拖動時重算。taskcrew 照它排隊，
+   * 所以「執行順序」跟「你看到的順序」是同一回事 —— 不照它排的話，
+   * 你在 UI 上調的順序會被默默忽略。
+   */
+  ordinal?: number
   /** 卡片檔案的絕對路徑 */
   path: string
   /** frontmatter 全部欄位，含 taskcrew 不認識的 — 寫回時原樣保留 */

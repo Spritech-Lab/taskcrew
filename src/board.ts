@@ -54,6 +54,7 @@ export async function readCard(path: string): Promise<Card> {
     parentTaskId: frontmatter.parent_task_id
       ? String(frontmatter.parent_task_id)
       : undefined,
+    ordinal: typeof frontmatter.ordinal === 'number' ? frontmatter.ordinal : undefined,
     path,
     frontmatter,
     sections,
@@ -253,4 +254,23 @@ export function stripLeadingHeading(text: string, sectionName: string): string {
 /** 比對用：去掉大小寫、空白與各種標點的差異 */
 function normalize(s: string): string {
   return s.toLowerCase().replace(/[\s:：\-—_.。、,，]/g, '')
+}
+
+/**
+ * 看板上的順序。**跟你在 web UI 上看到的順序一致。**
+ *
+ * Backlog.md 用 `ordinal` 表示欄位內的位置，你拖動卡片就是在改它。
+ * 不照它排的話，你在 UI 上調的順序會被默默忽略 —— 那是最糟的一種行為：
+ * 介面讓你以為你控制得了，實際上沒有。
+ *
+ * 沒有 `ordinal` 的卡排在最後（手寫的卡可能沒這個欄位），同順位再比 ID。
+ *
+ * 刻意**不把 milestone 加進排序**：看板一欄就是一個扁平清單，執行順序要跟
+ * 你看到的一樣。milestone 的先後是閘門的事，不是排序的事。
+ */
+export function byBoardOrder(a: Card, b: Card): number {
+  const oa = a.ordinal ?? Number.POSITIVE_INFINITY
+  const ob = b.ordinal ?? Number.POSITIVE_INFINITY
+  if (oa !== ob) return oa - ob
+  return a.id.localeCompare(b.id, undefined, { numeric: true })
 }
