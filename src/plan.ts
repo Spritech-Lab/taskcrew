@@ -1,6 +1,6 @@
 import { listCards, setStatus, stripLeadingHeading, upsertSection } from './board.ts'
 import { isRateLimited } from './claude.ts'
-import { children, expandHome, satisfiesDownstream } from './gate.ts'
+import { expandHome, notReady } from './gate.ts'
 import type { Dispatcher } from './dispatch.ts'
 import { STATUS, type Card } from './types.ts'
 import { baseRefFor, mergeRefsFor, withWorktree } from './workspace.ts'
@@ -26,7 +26,7 @@ export interface PlanOptions {
 export interface PlanSummary {
   planned: number
   failed: number
-  /** 父卡因為子卡還沒產出成果而還沒輪到規劃 */
+  /** 因為依賴或子卡還沒產出成果，這張卡還沒輪到規劃 */
   waiting: number
   stoppedByLimit: boolean
   costUsd: number
@@ -48,18 +48,16 @@ export async function planAll(opts: PlanOptions): Promise<PlanSummary> {
   log(`「規劃中」有 ${pending.length} 張卡。`)
 
   for (const card of pending) {
-    // 父卡的工作是整合子卡的**實際產出**，所以在子卡跑完之前根本規劃不了 ——
-    // 那時要串接的介面還不存在，PM 只能瞎猜。跟閘門用同一條規則
-    // （satisfiesDownstream），只是提早到規劃階段。
+    // 這張卡要建立在別人的產出上（依賴或子卡），而那些產出還不存在的話，
+    // 根本規劃不了 —— 要串接的介面不在那裡，PM 只能瞎猜。跟閘門用同一條規則。
     //
-    // 實跑驗證過：不擋的話 PM 自己會停手回報「三個子模組完全不存在」。
-    // 它的判斷是對的，但那要花一次 Opus 呼叫才換到一句我們早就知道的話。
-    const waitingOn: Card[] = []
-    for (const child of children(card, all)) {
-      if (!(await satisfiesDownstream(child))) waitingOn.push(child)
-    }
+    // 實跑驗證過兩次：不擋的話 PM 自己會停手，回報「三個子模組完全不存在」
+    // 或「src/parse.js 在這個分支不存在」。它的判斷都是對的，但那要花一次
+    // Opus 呼叫（$0.24 上下）才換到一句我們早就知道的話，而且卡會被退回
+    // 「需求討論」，看起來像出了問題。
+    const waitingOn = await notReady(card, all)
     if (waitingOn.length > 0) {
-      log(`⏸  ${card.id} ${card.title} —— 等子卡完成：${waitingOn.map((c) => c.id).join('、')}`)
+      log(`⏸  ${card.id} ${card.title} —— 等上游產出成果：${waitingOn.join('、')}`)
       s.waiting++
       continue
     }

@@ -180,7 +180,7 @@ async function runCommand(
       [
         `已規劃 ${s.planned}`,
         `未完成 ${s.failed}`,
-        s.waiting ? `等子卡 ${s.waiting}` : null,
+        s.waiting ? `等上游 ${s.waiting}` : null,
         s.costUsd ? `花費 $${s.costUsd.toFixed(2)}` : null,
       ]
         .filter(Boolean)

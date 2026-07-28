@@ -71,23 +71,35 @@ export async function checkGate(
   if (problems.length > 0) return { kind: 'fail', problems }
 
   // 7. 依賴與子卡 —— 放在最後，因為「還沒輪到」跟「不合格」是兩回事
-  const byId = new Map(allCards.map((c) => [c.id, c]))
-  const upstream = [
-    ...card.dependencies.map((id) => byId.get(id) ?? id),
-    // 父卡的工作是整合子卡的成果，所以每張子卡都要先有成果可整合。
-    ...children(card, allCards),
-  ]
-  const waitingOn: string[] = []
-  for (const u of upstream) {
-    if (typeof u === 'string') {
-      waitingOn.push(u) // 依賴指向一張不存在的卡
-    } else if (!(await satisfiesDownstream(u))) {
-      waitingOn.push(u.id)
-    }
-  }
-  if (waitingOn.length > 0) return { kind: 'blocked', waitingOn: [...new Set(waitingOn)] }
+  const waitingOn = await notReady(card, allCards)
+  if (waitingOn.length > 0) return { kind: 'blocked', waitingOn }
 
   return { kind: 'pass' }
+}
+
+/**
+ * 這張卡在等誰。
+ *
+ * 「依賴」和「子卡」是同一件事的兩種形狀 —— 都是**這張卡要建立在別人的產出上**。
+ * 依賴是「我要用你做出來的東西」，子卡是「我要把你們做出來的東西合起來」。
+ * 兩者都得等上游真的產出成果，所以用同一條規則。
+ *
+ * 規劃和執行也共用這個判斷。理由一樣：plan 若寫在一個上游還不存在的世界裡，
+ * 那份 plan 只能是猜的，而**你批准一份猜測等於沒有審查**。
+ */
+export async function notReady(card: Card, allCards: readonly Card[]): Promise<string[]> {
+  const byId = new Map(allCards.map((c) => [c.id, c]))
+  const upstream = [...card.dependencies.map((id) => byId.get(id) ?? id), ...children(card, allCards)]
+
+  const out: string[] = []
+  for (const u of upstream) {
+    if (typeof u === 'string') {
+      out.push(u) // 依賴指向一張不存在的卡
+    } else if (!(await satisfiesDownstream(u))) {
+      out.push(u.id)
+    }
+  }
+  return [...new Set(out)]
 }
 
 /**

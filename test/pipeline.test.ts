@@ -673,6 +673,26 @@ test('同一次排空裡，上游剛跑完下游就接著跑 —— 整晚跑得
   assert.equal(merged.code, 0, '下游的分支必須含有上游的成果')
 })
 
+test('依賴還沒產出成果時，這張卡也不送去規劃', async () => {
+  // 「依賴」和「子卡」是同一件事的兩種形狀，規則要一致。
+  // 實跑撞過：TASK-1.2 依賴 TASK-1.1，兩張同一批送規劃，PM 站在還沒有
+  // parse.js 的世界裡，停手回報「src/parse.js 在這個分支不存在」。
+  const fx = await makeFixture({
+    files: { pattern: 'x' },
+    verify: VERIFY,
+    status: '規劃中',
+    dependencies: ['TASK-9'],
+    extraCards: [{ id: 'TASK-9', status: '待執行', repo: true }],
+    steps: [says('# Plan\n做吧')],
+  })
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  const s = await planAll({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+  assert.equal(s.waiting, 1)
+  assert.equal(s.planned, 0)
+  assert.equal((await fx.calls()).length, 0, '等上游就不該呼叫 PM')
+})
+
 test('子卡跑完通過（還沒人驗）就足以讓父卡進規劃', async () => {
   // 這條跟排空那組同源：規劃階段的擋板也不該預設等人，
   // 否則父卡的 plan 要等你點過三次才產得出來。
