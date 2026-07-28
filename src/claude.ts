@@ -68,6 +68,11 @@ export interface AgentResult {
   ok: boolean
   /** agent 的最終文字輸出 */
   text: string
+  /**
+   * 這次用的 session。帶著它再呼叫一次就會續接同一段對話 ——
+   * 常駐 agent 靠這個累積對某個 repo 的認識，不必每次從零摸索。
+   */
+  sessionId: string | null
   /** 這次呼叫的花費（USD 等值）；解析不到時為 null */
   costUsd: number | null
   /** claude 行程的 exit code */
@@ -78,6 +83,13 @@ export interface AgentResult {
 export interface InvokeOptions {
   /** agent 的工作目錄 —— 目標 repo，不是 board */
   cwd: string
+  /**
+   * 續接這個 session。
+   *
+   * 有它就是「同一個 agent 接著上次的認識繼續」，沒有就是全新的開始。
+   * 換方案時刻意不帶 —— 那時要的正是不被上一個方案的思路錨定。
+   */
+  resume?: string | null
   /** 額外禁止的工具，附加在 DENIED_TOOLS 之後 */
   extraDenied?: readonly string[]
   timeoutMs?: number
@@ -93,6 +105,7 @@ export async function invoke(
   const args = [
     '-p',
     prompt,
+    ...(opts.resume ? ['--resume', opts.resume] : []),
     '--model',
     spec.model,
     '--effort',
@@ -120,6 +133,7 @@ export async function invoke(
     return {
       ok: false,
       text: '',
+      sessionId: null,
       costUsd: null,
       exitCode: r.code,
       raw: r.stderr || r.stdout,
@@ -129,18 +143,20 @@ export async function invoke(
   try {
     const parsed = JSON.parse(r.stdout) as {
       result?: string
+      session_id?: string
       total_cost_usd?: number
       is_error?: boolean
     }
     return {
       ok: parsed.is_error !== true,
       text: parsed.result ?? '',
+      sessionId: parsed.session_id ?? null,
       costUsd: typeof parsed.total_cost_usd === 'number' ? parsed.total_cost_usd : null,
       exitCode: 0,
       raw: r.stdout,
     }
   } catch {
-    return { ok: false, text: '', costUsd: null, exitCode: 0, raw: r.stdout }
+    return { ok: false, text: '', sessionId: null, costUsd: null, exitCode: 0, raw: r.stdout }
   }
 }
 

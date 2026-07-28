@@ -30,6 +30,12 @@ export async function runWorker(opts: WorkerOptions): Promise<void> {
   const ns = boardNs(opts.boardDir)
   const queue = KEYS.request(ns, opts.role)
 
+  /**
+   * 每個 repo 的 session。這是常駐真正的價值 ——
+   * 第二次被叫到同一個 repo 時，它已經認識那份 codebase 了。
+   */
+  const sessions = new Map<string, string>()
+
   log(`${opts.role} agent 待命中（${spec.model} / ${spec.effort}）· board ${ns}`)
 
   try {
@@ -53,8 +59,12 @@ export async function runWorker(opts: WorkerOptions): Promise<void> {
         continue
       }
 
-      log(`  接到派工 ${req.id.slice(0, 8)}`)
-      const result = await invoke(spec, req.prompt, { cwd: req.cwd })
+      if (req.fresh) sessions.delete(req.cwd)
+      const resume = sessions.get(req.cwd)
+      log(`  接到派工 ${req.id.slice(0, 8)}${resume ? '（續接既有 session）' : '（新 session）'}`)
+
+      const result = await invoke(spec, req.prompt, { cwd: req.cwd, resume })
+      if (result.sessionId) sessions.set(req.cwd, result.sessionId)
       const res: AgentResponse = { id: req.id, ...result }
 
       // 回覆佇列設短 TTL —— coordinator 早就逾時放棄的回覆不該永遠留著

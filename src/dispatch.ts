@@ -12,8 +12,18 @@ import { invoke, type AgentResult, type Role } from './claude.ts'
  *            因為別人 `npm install` 想試一下不該先被要求架一個服務
  *   Bus   —— 走 Redis，agent 是常駐的訂閱者（見 bus.ts）
  */
+export interface InvokeOpts {
+  /**
+   * 丟掉這個角色在這個 repo 累積的 session，從零開始。
+   *
+   * 只有換方案時該用 —— 那時要的正是不被上一個方案的思路錨定。
+   * 其餘情況都該續接，讓 agent 保住對這個 repo 的認識。
+   */
+  fresh?: boolean
+}
+
 export interface Dispatcher {
-  invoke(role: Role, prompt: string, cwd: string): Promise<AgentResult>
+  invoke(role: Role, prompt: string, cwd: string, opts?: InvokeOpts): Promise<AgentResult>
   /**
    * 這個角色的模型設定，只給事件顯示用。
    *
@@ -57,14 +67,26 @@ export type PipelineEvent =
 export class LocalDispatcher implements Dispatcher {
   readonly #agents: Agents
   readonly #log: (line: string) => void
+  /**
+   * 每個 (角色, repo) 的 session。
+   *
+   * 本機模式沒有常駐行程，但**一次排空就是一個行程** ——
+   * 所以同一次執行裡的第二張卡，PM 已經認識這個 repo 了。
+   * 換 repo 就換 session：不同專案的脈絡不該混在一起。
+   */
+  readonly #sessions = new Map<string, string>()
 
   constructor(agents: Agents, log: (line: string) => void) {
     this.#agents = agents
     this.#log = log
   }
 
-  invoke(role: Role, prompt: string, cwd: string): Promise<AgentResult> {
-    return invoke(this.#agents[role], prompt, { cwd })
+  async invoke(role: Role, prompt: string, cwd: string, opts?: InvokeOpts): Promise<AgentResult> {
+    const key = `${role}:${cwd}`
+    if (opts?.fresh) this.#sessions.delete(key)
+    const r = await invoke(this.#agents[role], prompt, { cwd, resume: this.#sessions.get(key) })
+    if (r.sessionId) this.#sessions.set(key, r.sessionId)
+    return r
   }
 
   describe(role: Role) {

@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 import { createClient, type RedisClientType } from 'redis'
 import type { Agents } from './agents.ts'
 import type { AgentResult, Role } from './claude.ts'
-import { format, type Dispatcher, type PipelineEvent } from './dispatch.ts'
+import { format, type Dispatcher, type InvokeOpts, type PipelineEvent } from './dispatch.ts'
 
 /**
  * Redis 匯流排。
@@ -39,7 +39,28 @@ export const KEYS = {
   request: (ns: string, role: Role) => `${NS}:${ns}:req:${role}`,
   response: (ns: string, id: string) => `${NS}:${ns}:res:${id}`,
   events: (ns: string) => `${NS}:${ns}:events`,
+  /** 入口層下的指令。用 LIST 而非 pub/sub —— 服務重啟時的指令不該消失 */
+  commands: (ns: string) => `${NS}:${ns}:commands`,
 } as const
+
+/**
+ * 入口層可以下的指令。
+ *
+ * 卡進了 queue 只是排隊，**不會自己開始** —— 每次執行都是一次明確授權。
+ * 這裡就是那個授權的形式：你在 Discord 講一句，入口層發一則 run 指令。
+ */
+export type Command =
+  | { type: 'run'; at?: number }
+  | { type: 'plan'; at?: number }
+
+export async function sendCommand(boardDir: string, cmd: Command): Promise<void> {
+  const client = await connect()
+  try {
+    await client.rPush(KEYS.commands(boardNs(boardDir)), JSON.stringify(cmd))
+  } finally {
+    await client.quit()
+  }
+}
 
 export interface AgentRequest {
   id: string
@@ -54,6 +75,8 @@ export interface AgentRequest {
    * 無人看管的情境下更糟：昨晚中斷的工作明天自己跑起來。
    */
   deadline: number
+  /** 丟掉累積的 session，從零開始（換方案時用） */
+  fresh?: boolean
 }
 
 export interface AgentResponse extends AgentResult {
@@ -114,9 +137,15 @@ export class BusDispatcher implements Dispatcher {
     return new BusDispatcher(await connect(), boardDir, agents, log, timeoutSec)
   }
 
-  async invoke(role: Role, prompt: string, cwd: string): Promise<AgentResult> {
+  async invoke(role: Role, prompt: string, cwd: string, opts?: InvokeOpts): Promise<AgentResult> {
     const id = randomUUID()
-    const req: AgentRequest = { id, prompt, cwd, deadline: Date.now() + this.#timeoutSec * 1000 }
+    const req: AgentRequest = {
+      id,
+      prompt,
+      cwd,
+      deadline: Date.now() + this.#timeoutSec * 1000,
+      fresh: opts?.fresh,
+    }
     await this.#client.rPush(KEYS.request(this.#ns, role), JSON.stringify(req))
 
     // 每個請求一條專屬的回覆佇列 —— 不會跟其他請求的回覆混在一起
@@ -125,13 +154,21 @@ export class BusDispatcher implements Dispatcher {
       return {
         ok: false,
         text: '',
+        sessionId: null,
         costUsd: null,
         exitCode: -1,
         raw: `等 ${role} agent 回覆逾時（${this.#timeoutSec}s）—— 它可能沒在跑，或中途死了`,
       }
     }
     const res = JSON.parse(raw.element) as AgentResponse
-    return { ok: res.ok, text: res.text, costUsd: res.costUsd, exitCode: res.exitCode, raw: res.raw }
+    return {
+      ok: res.ok,
+      text: res.text,
+      sessionId: res.sessionId,
+      costUsd: res.costUsd,
+      exitCode: res.exitCode,
+      raw: res.raw,
+    }
   }
 
   emit(event: PipelineEvent): void {

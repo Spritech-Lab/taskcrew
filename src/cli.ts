@@ -2,10 +2,12 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { defaultAgentFiles, loadAgents } from './agents.ts'
-import { BusDispatcher, pingBus } from './bus.ts'
+import { BusDispatcher, pingBus, sendCommand } from './bus.ts'
 import { LocalDispatcher, type Dispatcher } from './dispatch.ts'
 import { planAll } from './plan.ts'
 import { countPlanning, drain } from './runner.ts'
+import { serve } from './serve.ts'
+import { watch } from './watch.ts'
 import { runWorker } from './worker.ts'
 import type { Role } from './claude.ts'
 
@@ -29,6 +31,11 @@ taskcrew — 把 Backlog.md 看板變成無人看管的多 agent 開發產線
   taskcrew run  [board]    排空「待執行」欄
   taskcrew agent <role> [board]
                            把一個角色跑成常駐 agent（pm / junior / senior / qa）
+
+  taskcrew serve [board]   常駐服務：等入口層下指令再執行
+  taskcrew watch [board]   訂閱產線事件（也是入口層的參考實作）
+  taskcrew send <run|plan> [board] [--at <ISO時間>]
+                           對常駐服務下指令
 
   taskcrew <cmd> --dry     只列出會做什麼，不實際執行
   taskcrew <cmd> --bus     走 Redis 派工給常駐 agent（預設是直接 spawn）
@@ -84,6 +91,46 @@ async function main(argv: string[]): Promise<number> {
       process.on(sig, () => ac.abort())
     }
     await runWorker({ role, boardDir, signal: ac.signal })
+    return 0
+  }
+
+  if (cmd === 'serve' || cmd === 'watch') {
+    const boardDir = resolve(rest.find((a) => !a.startsWith('-')) ?? process.cwd())
+    if (!(await pingBus())) {
+      console.error('連不上 Redis —— 這個指令需要它。先確認 redis-server 有在跑。')
+      return 4
+    }
+    const ac = new AbortController()
+    for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => ac.abort())
+    if (cmd === 'serve') await serve({ boardDir, signal: ac.signal })
+    else {
+      console.log(`訂閱 ${boardDir} 的產線事件。Ctrl-C 結束。\n`)
+      await watch({ boardDir, signal: ac.signal })
+    }
+    return 0
+  }
+
+  if (cmd === 'send') {
+    const what = rest[0]
+    if (what !== 'run' && what !== 'plan') {
+      console.error('用法：taskcrew send <run|plan> [board] [--at <ISO時間>]')
+      return 2
+    }
+    const atIdx = rest.indexOf('--at')
+    const at = atIdx >= 0 ? Date.parse(rest[atIdx + 1] ?? '') : undefined
+    if (atIdx >= 0 && Number.isNaN(at)) {
+      console.error('--at 的時間看不懂。用 ISO 格式，例如 2026-07-29T02:00')
+      return 2
+    }
+    const boardDir = resolve(
+      rest.slice(1).find((a) => !a.startsWith('-') && a !== rest[atIdx + 1]) ?? process.cwd(),
+    )
+    if (!(await pingBus())) {
+      console.error('連不上 Redis。')
+      return 4
+    }
+    await sendCommand(boardDir, { type: what, at })
+    console.log(at ? `已排程 ${what}（${new Date(at).toLocaleString()}）` : `已送出 ${what}`)
     return 0
   }
 

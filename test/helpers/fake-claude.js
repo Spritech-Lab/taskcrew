@@ -54,12 +54,15 @@ const logPath = join(process.cwd(), '.tc-fake-calls.jsonl')
 {
   const modelIdx = process.argv.indexOf('--model')
   const effortIdx = process.argv.indexOf('--effort')
+  const resumeIdx = process.argv.indexOf('--resume')
   appendFileSync(
     logPath,
     JSON.stringify({
       step: i,
       model: modelIdx > 0 ? process.argv[modelIdx + 1] : null,
       effort: effortIdx > 0 ? process.argv[effortIdx + 1] : null,
+      // 測試靠這個確認「換方案時重置、其餘延續」有沒有做對
+      resume: resumeIdx > 0 ? process.argv[resumeIdx + 1] : null,
     }) + '\n',
     'utf8',
   )
@@ -74,9 +77,14 @@ for (const [rel, content] of Object.entries(step.apply ?? {})) {
 
 if (step.exit) process.exit(step.exit)
 
+// session_id 依 (模型, 工作目錄) 決定 —— 模擬「同一個 agent 在同一個 repo
+// 續接同一段對話」。續接時回傳同一個 id，就像真的 claude 一樣。
+const modelIdx2 = process.argv.indexOf('--model')
+const model = modelIdx2 > 0 ? process.argv[modelIdx2 + 1] : 'x'
 console.log(
   JSON.stringify({
     result: step.text ?? '',
+    session_id: `sess-${model}-${Buffer.from(process.cwd()).toString('base64url').slice(-6)}`,
     total_cost_usd: step.cost ?? 0,
     is_error: step.isError ?? false,
   }),

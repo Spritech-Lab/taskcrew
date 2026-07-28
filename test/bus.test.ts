@@ -172,3 +172,63 @@ test('兩個 board 的 agent 不會互相搶工作 —— 這是 firewall，不�
     await Promise.all([...aWorkers, ...bWorkers])
   }
 })
+
+test('入口層下指令 → 常駐服務執行 → 事件推回', { skip: !hasRedis && '沒有 Redis' }, async () => {
+  const { serve } = await import('../src/serve.ts')
+  const { sendCommand } = await import('../src/bus.ts')
+  const { watch } = await import('../src/watch.ts')
+
+  const fx = await makeFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+
+  const ac = new AbortController()
+  const seen: string[] = []
+
+  // 三個角色：入口層（watch）、服務（serve）、工人（agent）
+  const watching = watch({ boardDir: fx.boardDir, signal: ac.signal, onEvent: (e) => seen.push(e.type) })
+  const workers = (['pm', 'junior', 'senior', 'qa'] as const).map((role) =>
+    runWorker({ role, boardDir: fx.boardDir, signal: ac.signal, log: () => {} }),
+  )
+  const serving = serve({ boardDir: fx.boardDir, signal: ac.signal, log: () => {} })
+
+  try {
+    await new Promise((r) => setTimeout(r, 300)) // 讓訂閱建立
+    await sendCommand(fx.boardDir, { type: 'run' })
+
+    // 等卡跑完
+    for (let i = 0; i < 60 && !seen.includes('card-done'); i++) {
+      await new Promise((r) => setTimeout(r, 200))
+    }
+
+    assert.ok(seen.includes('card-done'), `沒等到完成事件；收到：${seen.join(', ')}`)
+    assert.equal((await readCard(fx.cardPath)).status, '執行完成回報')
+  } finally {
+    ac.abort()
+    await Promise.all([watching, serving, ...workers])
+  }
+})
+
+test('排程指令會等到時間才執行', { skip: !hasRedis && '沒有 Redis' }, async () => {
+  const { serve } = await import('../src/serve.ts')
+  const { sendCommand } = await import('../src/bus.ts')
+
+  const fx = await makeFixture({ files: { pattern: 'xxx' }, verify: VERIFY, steps: [] })
+  const ac = new AbortController()
+  const lines: string[] = []
+  const serving = serve({ boardDir: fx.boardDir, signal: ac.signal, log: (l) => lines.push(l) })
+
+  try {
+    await new Promise((r) => setTimeout(r, 200))
+    await sendCommand(fx.boardDir, { type: 'run', at: Date.now() + 60_000 })
+    await new Promise((r) => setTimeout(r, 1500))
+
+    assert.match(lines.join('\n'), /收到排程指令 run/)
+    assert.doesNotMatch(lines.join('\n'), /執行 run/, '時間還沒到就不該執行')
+  } finally {
+    ac.abort()
+    await serving
+  }
+})

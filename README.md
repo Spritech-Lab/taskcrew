@@ -19,8 +19,8 @@ $ taskcrew run
    ✓ passed (1 attempt, $0.19)
 ```
 
-> **Status: early.** The pipeline works end to end and is covered by 49 tests, but the
-> resident service and multi-channel intake are not built yet. See [Roadmap](#roadmap).
+> **Status: early but working end to end** — 73 tests, including the resident-agent path.
+> See [Roadmap](#roadmap) for what's still missing.
 
 ## Install
 
@@ -101,6 +101,10 @@ PM decides which tier applies and must say so explicitly — the two paths treat
 ```
 
 A criterion you cannot back with a test isn't a criterion. It's a wish.
+
+Those references do real work: **a card is judged only on the tests it claims.** One repo
+usually holds several cards, and without scoping each card fails on the others' red tests —
+which quietly pressures the agent to reach outside its stated scope to make the suite green.
 
 **"Did it work" is mechanical; "is it good" is judgment.** `verify` must emit per-test results, not just an exit code — because comparing per-test results *across rounds* is the only objective way to tell "the implementation is wrong" from "the approach is wrong":
 
@@ -210,25 +214,41 @@ taskcrew <cmd> --dry      # show what would happen, change nothing
 ### Resident agents (optional)
 
 By default each role is spawned as a subprocess and exits when done — **no infrastructure
-required**. With Redis you can instead run each role as a resident process that subscribes
-to a work queue:
+required**. With Redis, each role instead runs as a resident process subscribed to a work
+queue, and a service waits for commands from wherever you send them:
 
 ```bash
 redis-server &
-taskcrew agent junior ~/my-board &      # one process per role
+
+taskcrew agent pm     ~/my-board &      # one process per role
+taskcrew agent junior ~/my-board &
 taskcrew agent senior ~/my-board &
 taskcrew agent qa     ~/my-board &
-taskcrew agent pm     ~/my-board &
 
-taskcrew run ~/my-board --bus
+taskcrew serve ~/my-board &             # waits for commands
+taskcrew watch ~/my-board               # live event stream
 ```
 
-This buys three things: pipeline events are published to `taskcrew:<board>:events` so an
-intake client (a chat bot, a dashboard) can show live progress; agents can later live on a
-different machine; and new agents can join by subscribing, without changing the core.
+Then, from anywhere — a chat bot, a cron job, your phone over SSH:
+
+```bash
+taskcrew send run  ~/my-board
+taskcrew send run  ~/my-board --at 2026-07-29T02:00
+```
+
+Resident mode buys three things a subprocess can't:
+
+| | |
+|---|---|
+| **Agents remember the repo** | Sessions are resumed per `(role, repo)`, so the second card doesn't re-learn the codebase. Deliberately **reset on `REPLACE`** — the branch went back to `base_branch`, so anything the agent remembers changing is now false |
+| **Live events** | Everything is published to `taskcrew:<board>:events`. `taskcrew watch` is the reference subscriber — your bot does the same thing with a different renderer |
+| **Agents can move or multiply** | A role can run on another machine, or a new role can join by subscribing, without touching the core |
 
 **Queues are namespaced per board.** Two boards never consume each other's work — that
 isolation is a firewall guarantee, not housekeeping, and it has a test of its own.
+
+taskcrew ships **no chat bot**. It defines the event contract and the command queue;
+the intake layer is yours.
 
 A run ends for exactly two reasons: the queue is empty, or the subscription limit is reached. There is no card cap, time cap, or spend cap — **it only ever uses your subscription quota.**
 
@@ -239,14 +259,15 @@ A run ends for exactly two reasons: the queue is empty, or the subscription limi
 | 0 | Backlog.md compatibility verified | ✅ |
 | 1 | Minimal chain: card → agent → verify → write back | ✅ |
 | 2 | Four-role pipeline, three-loop escalation | ✅ |
-| 3 | Resident service, Postgres execution history | |
-| — | *Redis is deferred until resident agents actually need to message each other* | |
-| 4 | Intake API for Discord / Telegram / custom clients | |
+| 3 | Resident agents, command queue, live event stream | ✅ |
+| 4 | Postgres execution history | |
+| 5 | Parent/child cards: integration + whole-milestone verification | |
 
 ## Development
 
 ```bash
-npm test          # 49 tests; integration tests stub the agent for determinism
+npm test          # 73 tests; integration tests stub the agent for determinism
+                  # 6 of them need Redis and skip automatically when it's absent
 ```
 
 Control flow is pinned down with a fake `claude` binary — escalation logic can't be tested

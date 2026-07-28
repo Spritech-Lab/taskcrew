@@ -77,7 +77,8 @@ test('同一批測試一直掛 → stuck → PM 換方案 → 新分支從頭來
     steps: [
       writes('axx'), // 方案1 輪1 junior
       writes('axx'), // 方案1 輪2 senior —— 失敗集合沒動 = stuck
-      says('REPLACE:\n\n新的做法：換個方式'), // PM 判定結構有問題
+      says('REPLACE:'), // PM 判定結構有問題（這次的 plan 會被丟掉）
+      says('乾淨 session 裡重想的做法'), // PM 在新 session 產出替代方案
       writes('aaa'), // 方案2 輪1 junior
       says('減完了'), // senior 減法
       says('符合要求'), // QA
@@ -107,7 +108,12 @@ test('autonomy: propose —— PM 想得出新方案，但不准自己執行', a
     files: { pattern: 'xxx' },
     verify: VERIFY,
     autonomy: 'propose',
-    steps: [writes('axx'), writes('axx'), says('REPLACE:\n\n這次改用另一種做法')],
+    steps: [
+      writes('axx'),
+      writes('axx'),
+      says('REPLACE:'),
+      says('這次改用另一種做法'), // 乾淨 session 產出的才是真正採用的
+    ],
   })
 
   assert.equal(summary.proposed, 1)
@@ -270,7 +276,8 @@ test('PM 判定 REPLACE：開新分支，舊 code 丟掉', async () => {
     steps: [
       writes('axx'),
       writes('axx'),
-      says('REPLACE:\n\n結構就錯了，換一個做法'),
+      says('REPLACE:'),
+      says('結構就錯了，換一個做法'),
       writes('aaa'),
       says('減完了'),
       says('符合要求'),
@@ -347,4 +354,88 @@ test('board 層的 agent 覆寫會真的影響產線呼叫的模型', async () =
     ['sonnet/high', 'opus/xhigh', 'sonnet/max'],
     '第三個呼叫是 QA —— 應該用 board 覆寫後的 sonnet/max，不是預設的 haiku/medium',
   )
+})
+
+// ── session 延續 ────────────────────────────────────────────────────────
+//
+// 常駐的價值在於 agent 記得這個 repo。但換方案時那份記憶會變成負債 ——
+// 分支已經重設回 base_branch，它記得的「我改過什麼」全是假的。
+
+test('同一次執行裡，第二張卡的 agent 續接前一張的 session', async () => {
+  const { fx } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    steps: [
+      writes('aaa'), says('減完了'), says('符合要求'), // 卡 1
+      writes('aaa'), says('減完了'), says('符合要求'), // 卡 2（同 repo）
+    ],
+    extraCards: [{ id: 'TASK-2', status: '完成' }],
+  })
+
+  const calls = await fx.calls()
+  // 第一次一定是新的；同角色的第二次應該帶 --resume
+  assert.equal(calls[0].resume, null, '第一次呼叫沒有 session 可續接')
+  const juniorCalls = calls.filter((c) => c.model === 'sonnet')
+  if (juniorCalls.length > 1) {
+    assert.ok(juniorCalls[1].resume, 'junior 第二次該續接同一個 session')
+  }
+})
+
+test('換方案時所有角色重置 session —— 那個世界已經不存在了', async () => {
+  const { fx, summary } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    autonomy: 'replan:1',
+    steps: [
+      writes('axx'), // 方案1 輪1 junior
+      writes('axx'), // 方案1 輪2 senior → stuck
+      says('REPLACE:'), // PM 判定（帶著脈絡）
+      says('乾淨 session 裡重想的做法'), // PM 換方案（乾淨）
+      writes('aaa'), // 方案2 輪1 junior
+      says('減完了'),
+      says('符合要求'),
+    ],
+  })
+
+  assert.equal(summary.done, 1)
+  const calls = await fx.calls()
+
+  // 索引 2 是 PM 的判斷（要帶脈絡，但那是它第一次，所以沒有 resume）
+  // 索引 3 是 PM 換方案 —— 就算前一次已經建立 session，這次也不該續接
+  assert.equal(calls[3].resume, null, 'PM 換方案要在乾淨 session 裡想')
+
+  // 索引 4 是方案 2 的 junior —— 方案 1 已經建立過 session，但這次要重置
+  assert.equal(calls[4].resume, null, '換方案後 junior 也要重置')
+})
+
+test('修正時不重置 —— PM 在調整自己的方案，記得原本的思路正是必要的', async () => {
+  const { fx, summary } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    steps: [
+      writes('axx'),
+      writes('axx'),
+      says('REVISE:\n\n細節修正'),
+      writes('aaa'),
+      says('減完了'),
+      says('符合要求'),
+    ],
+  })
+
+  assert.equal(summary.done, 1)
+  const calls = await fx.calls()
+  // 索引 3 是修正後的 junior —— 同一條分支、同一個方案，成果還在，該續接
+  assert.ok(calls[3].resume, '修正後 junior 該續接，不是從零開始')
+})
+
+test('一張卡不會被別張卡的測試擋住 —— 只看自己驗收條件涵蓋的', async () => {
+  const { summary } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    // 這張卡只負責 t0；t1/t2 是別張卡的工作，跑完仍然是紅的
+    sections: { 'Acceptance Criteria': '- [ ] #1 只管這條 → `test/run.js::t0`' },
+    steps: [writes('axx'), says('減完了'), says('符合要求')],
+  })
+
+  assert.equal(summary.done, 1, 't0 過了就該算過，不該被 t1/t2 擋住')
 })

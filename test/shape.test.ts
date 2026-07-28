@@ -53,3 +53,48 @@ test('部分輪次沒有逐條結果時，只用拿得到的那幾輪判定', ()
 test('空的結果陣列不會被當成「全過」', () => {
   assert.equal(analyze([[]]), 'unknown')
 })
+
+// ── 驗收範圍 ────────────────────────────────────────────────────────────
+
+test('驗收只看這張卡涵蓋的測試 —— 否則多張卡會互相擋住', async () => {
+  const { scopeToCard, testRefs, passed } = await import('../src/verify.ts')
+
+  const whole = {
+    exitCode: 1,
+    stdout: '',
+    stderr: '',
+    results: [
+      { name: 'slug-lowercases', passed: true },
+      { name: 'slug-spaces', passed: true },
+      { name: 'initials-single', passed: false }, // 別張卡的工作
+      { name: 'initials-two', passed: false },
+    ],
+  }
+  const refs = testRefs('- [ ] #1 x → `test/run.js::slug-lowercases`\n- [ ] #2 y → `test/run.js::slug-spaces`')
+
+  const { outcome, matched } = scopeToCard(whole, refs)
+  assert.equal(matched, 2)
+  assert.equal(passed(outcome), true, '這張卡自己的測試都過了就該算過')
+  assert.equal(passed(whole), false, '整套結果仍然是失敗的 —— 那是別張卡的事')
+})
+
+test('驗收條件引用的測試一條都對不上時，退回整套結果並回報 matched=0', async () => {
+  const { scopeToCard } = await import('../src/verify.ts')
+  const whole = {
+    exitCode: 1,
+    stdout: '',
+    stderr: '',
+    results: [{ name: 'a', passed: false }],
+  }
+  const { outcome, matched } = scopeToCard(whole, ['completely-different'])
+  assert.equal(matched, 0, '對不上要讓呼叫端知道')
+  assert.equal(outcome.results?.length, 1, '悄悄放行是最糟的選項 —— 用整套結果比較安全')
+})
+
+test('抓得出 → 後面的測試引用', async () => {
+  const { testRefs } = await import('../src/verify.ts')
+  assert.deepEqual(
+    testRefs('- [ ] #1 空白轉連字號 → `test/run.js::spaces-to-dashes`\n- [ ] #2 沒有引用的一條'),
+    ['`test/run.js::spaces-to-dashes`'],
+  )
+})

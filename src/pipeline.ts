@@ -6,7 +6,7 @@ import { describeVerdict, parseVerdict, type QaVerdict } from './qa.ts'
 import { analyze, describe, shouldEscalate } from './shape.ts'
 import { git } from './shell.ts'
 import type { Autonomy, Card, TestResult } from './types.ts'
-import { passed, summarize, verify } from './verify.ts'
+import { passed, scopeToCard, summarize, testRefs, verify } from './verify.ts'
 
 /**
  * 一張卡的完整產線。
@@ -116,8 +116,12 @@ export async function runPipeline(
     let planVersion = 1
     let pendingReplacement = ''
 
+    // 換方案會把分支重設回 base_branch，所以每個角色記得的「我改過什麼」
+    // 都變成假的 —— 那個世界已經不存在了。全部重置 session。
+    const freshRoles = attemptNo > 1 ? new Set<'pm' | 'junior' | 'senior' | 'qa'>(['pm', 'junior', 'senior', 'qa']) : new Set<'pm' | 'junior' | 'senior' | 'qa'>()
+
     while (true) {
-      const attempt = await runAttempt(card, repo, branch, plan, attemptNo, planVersion, d)
+      const attempt = await runAttempt(card, repo, branch, plan, attemptNo, planVersion, d, freshRoles)
       attempts.push(attempt)
       cost += attempt.cost
 
@@ -162,7 +166,10 @@ export async function runPipeline(
       }
 
       if (pm.decision.kind === 'replace') {
-        pendingReplacement = pm.decision.plan
+        // 刻意不用 pm.decision.plan —— 那是在「記得自己剛才規劃了什麼」的
+        // context 裡產出的，多半是原方案的變體。判斷可以帶著脈絡做，
+        // 但替代方案要在乾淨的 session 裡重新想。
+        pendingReplacement = ''
         break
       }
 
@@ -221,6 +228,7 @@ async function runAttempt(
   attemptNo: number,
   planVersion: number,
   d: Dispatcher,
+  freshRoles: Set<'pm' | 'junior' | 'senior' | 'qa'>,
 ): Promise<AttemptRecord> {
   const cfg = card.runner!
   const at = { card: card.id, attempt: attemptNo, version: planVersion }
@@ -254,6 +262,7 @@ async function runAttempt(
       devRole,
       isFirst ? devPrompt(card, plan) : takeoverPrompt(card, plan, rec),
       repo,
+      { fresh: takeFresh(freshRoles, devRole) },
     )
     round.cost += devResult.costUsd ?? 0
     rec.cost += devResult.costUsd ?? 0
@@ -284,7 +293,8 @@ async function runAttempt(
       return rec
     }
 
-    let v = await verify(cfg.verify, repo)
+    const refs = testRefs(section(card, 'Acceptance Criteria'))
+    let v = scopeToCard(await verify(cfg.verify, repo), refs).outcome
     round.results = v.results
     round.verifySummary = summarize(v)
     d.emit({ type: 'verify', ...at, round: roundNo, summary: round.verifySummary, passed: passed(v) })
@@ -292,7 +302,9 @@ async function runAttempt(
     // 減法只在第一輪做 —— 第二輪的開發者就是 senior，他寫的時候已經在減了。
     if (isFirst && passed(v)) {
       d.emit({ type: 'reduce-start', ...at, round: roundNo })
-      const reduce = await d.invoke('senior', reducePrompt(card, plan), repo)
+      const reduce = await d.invoke('senior', reducePrompt(card, plan), repo, {
+        fresh: takeFresh(freshRoles, 'senior'),
+      })
       round.cost += reduce.costUsd ?? 0
       rec.cost += reduce.costUsd ?? 0
       if (isRateLimited(reduce)) {
@@ -301,7 +313,7 @@ async function runAttempt(
         return rec
       }
       // 減法是修改，修改就要驗證。這是防止減過頭的唯一保險。
-      v = await verify(cfg.verify, repo)
+      v = scopeToCard(await verify(cfg.verify, repo), refs).outcome
       round.results = v.results
       round.verifySummary = summarize(v)
       d.emit({ type: 'verify', ...at, round: roundNo, summary: round.verifySummary, passed: passed(v), afterReduction: true })
@@ -311,7 +323,9 @@ async function runAttempt(
 
     if (passed(v)) {
       d.emit({ type: 'qa-start', ...at, round: roundNo })
-      const qaResult = await d.invoke('qa', qaPrompt(card, plan, v.results), repo)
+      const qaResult = await d.invoke('qa', qaPrompt(card, plan, v.results), repo, {
+        fresh: takeFresh(freshRoles, 'qa'),
+      })
       round.cost += qaResult.costUsd ?? 0
       rec.cost += qaResult.costUsd ?? 0
       if (isRateLimited(qaResult)) {
@@ -359,7 +373,11 @@ async function askPm(
   repo: string,
   mode: 'decide' | 'force-replace',
 ): Promise<{ decision: PmDecision | null; cost: number; rateLimited: boolean }> {
-  const r = await d.invoke('pm', pmPrompt(card, failed, excluded, mode), repo)
+  const r = await d.invoke('pm', pmPrompt(card, failed, excluded, mode), repo, {
+    // 判斷「該修正還是該換方案」需要記得自己規劃了什麼；
+    // 產出替代方案則相反 —— 要的正是不被自己的思路拉住。
+    fresh: mode === 'force-replace',
+  })
   const cost = r.costUsd ?? 0
   if (isRateLimited(r)) return { decision: null, cost, rateLimited: true }
   if (!r.ok) return { decision: null, cost, rateLimited: false }
@@ -393,8 +411,12 @@ export function parsePmDecision(
   // 標頭之後的所有內容就是 plan（標頭同一行的殘餘也算進去）
   const after = trimmed.slice(m.index + m[0].length)
   const plan = stripLeadingHeading(`${(m[2] || '').trim()}\n${after}`.trim(), 'Implementation Plan')
+
+  // REPLACE 不需要附方案 —— 替代方案會在乾淨的 session 裡另外問。
+  // 要求 PM 在這裡寫一份注定被丟掉的 plan 是純粹的浪費。
+  if (keyword === 'REPLACE') return { kind: 'replace', plan }
   if (!plan) return null
-  return keyword === 'REVISE' ? { kind: 'revise', plan } : { kind: 'replace', plan }
+  return { kind: 'revise', plan }
 }
 
 // ── prompts ─────────────────────────────────────────────────────────────
@@ -524,7 +546,8 @@ function pmPrompt(
           '',
           '`REPLACE:` —— **做法本身錯了**，細節怎麼補都到不了。',
           '  這條路會丟掉現有的 code，從頭來過。',
-          '  標頭之後直接接一個**真正不同**的做法，不是原方案的變體。',
+          '  標頭之後**只要說明為什麼結構有問題**，不用寫替代方案 ——',
+          '  那會在一個乾淨的 session 裡另外問你，免得新方案變成舊方案的變體。',
           '',
           '`HANDBACK:` —— **問題不在 plan**，是需求或驗收條件本身有洞。',
           '  標頭之後說明你需要人確認什麼。換多少方案都解不了的情況請選這個。',
@@ -664,6 +687,19 @@ async function commit(repo: string, card: Card): Promise<void> {
 
 function section(card: Card, name: string): string {
   return (card.sections[name] ?? '').replace(/<!--[\s\S]*?-->/g, '').trim() || '（無）'
+}
+
+/**
+ * 取出並消費一次「這個角色需要重置 session」的標記。
+ * 只有換方案後的第一次呼叫要重置，之後同一個 attempt 內要延續。
+ */
+function takeFresh(
+  freshRoles: Set<'pm' | 'junior' | 'senior' | 'qa'>,
+  role: 'pm' | 'junior' | 'senior' | 'qa',
+): boolean {
+  if (!freshRoles.has(role)) return false
+  freshRoles.delete(role)
+  return true
 }
 
 /** 抓 `PREFIX: 內容` 這種第一行標記，回傳冒號後的內容。 */

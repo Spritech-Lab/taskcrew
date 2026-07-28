@@ -77,6 +77,58 @@ function extractJson(s: string): unknown {
   }
 }
 
+/**
+ * 只保留這張卡的驗收條件涵蓋到的測試。
+ *
+ * 同一個 repo 的多張卡共用一套測試指令，所以整套結果裡會有**別張卡的**
+ * 失敗項。不過濾的話，兩張卡會互相擋住對方 —— 每張卡都因為別人的測試沒過
+ * 而永遠無法通過，而 agent 為了讓測試變綠就會被迫越界去改不屬於它的檔案。
+ *
+ * 實跑時真的發生過：senior 停下來回報「我在既定範圍內無事可做，但測試也不會綠」。
+ * 它的判斷是對的，錯的是我讓它面對整套測試。
+ */
+export function scopeToCard(
+  o: VerifyOutcome,
+  refs: readonly string[],
+): { outcome: VerifyOutcome; matched: number } {
+  if (!o.results || refs.length === 0) return { outcome: o, matched: 0 }
+
+  const wanted = refs.map(normalizeRef).filter(Boolean)
+  const kept = o.results.filter((r) => wanted.some((w) => matches(r.name, w)))
+
+  // 一條都對不上代表驗收條件引用的測試不存在 —— 那時候用整套結果比較安全，
+  // 呼叫端會看到 matched=0 並據此警告。悄悄放行是最糟的選項。
+  if (kept.length === 0) return { outcome: o, matched: 0 }
+
+  return {
+    outcome: { ...o, results: kept, exitCode: kept.every((r) => r.passed) ? 0 : 1 },
+    matched: kept.length,
+  }
+}
+
+/** `test/run.js::slug-lowercases` → `slug-lowercases`；沒有 :: 就用整串 */
+function normalizeRef(ref: string): string {
+  const s = ref.replace(/[`'"]/g, '').trim()
+  const i = s.lastIndexOf('::')
+  return (i >= 0 ? s.slice(i + 2) : s).trim()
+}
+
+function matches(testName: string, ref: string): boolean {
+  const a = testName.toLowerCase()
+  const b = ref.toLowerCase()
+  return a === b || a.includes(b) || b.includes(a)
+}
+
+/** 從 Acceptance Criteria 的每一條裡抓出 `→` 之後的測試引用。 */
+export function testRefs(acceptanceCriteria: string): string[] {
+  const out: string[] = []
+  for (const line of acceptanceCriteria.split('\n')) {
+    const m = /→\s*(.+?)\s*$/.exec(line)
+    if (m) out.push(m[1])
+  }
+  return out
+}
+
 /** verify 過了沒。有逐條結果時以逐條為準，否則退回 exit code。 */
 export function passed(o: VerifyOutcome): boolean {
   if (o.results) return o.results.every((r) => r.passed)

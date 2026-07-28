@@ -20,7 +20,7 @@ export interface Fixture {
   repoDir: string
   cardPath: string
   /** 假 agent 每次呼叫收到的 --model / --effort，用來確認角色路由 */
-  calls(): Promise<{ model: string | null; effort: string | null }[]>
+  calls(): Promise<{ model: string | null; effort: string | null; resume: string | null }[]>
   card(): Promise<string>
 }
 
@@ -50,7 +50,7 @@ const DEFAULT_DESCRIPTION = `
 - 不要動測試檔
 `.trim()
 
-const DEFAULT_AC = `- [ ] #1 測試要過 → \`test::a\``
+const DEFAULT_AC = `- [ ] #1 測試要過 → \`test/run.js::t\``
 
 export async function makeFixture(o: FixtureOptions): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'tc-fx-'))
