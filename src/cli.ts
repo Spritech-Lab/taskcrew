@@ -177,7 +177,12 @@ async function runCommand(
     const s = await planAll({ boardDir, dryRun, dispatch })
     console.log('')
     console.log(
-      [`已規劃 ${s.planned}`, `未完成 ${s.failed}`, s.costUsd ? `花費 $${s.costUsd.toFixed(2)}` : null]
+      [
+        `已規劃 ${s.planned}`,
+        `未完成 ${s.failed}`,
+        s.waiting ? `等子卡 ${s.waiting}` : null,
+        s.costUsd ? `花費 $${s.costUsd.toFixed(2)}` : null,
+      ]
         .filter(Boolean)
         .join(' · '),
     )

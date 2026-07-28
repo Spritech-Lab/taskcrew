@@ -1,6 +1,6 @@
 import { listCards, setStatus, stripLeadingHeading, upsertSection } from './board.ts'
 import { isRateLimited } from './claude.ts'
-import { expandHome } from './gate.ts'
+import { children, expandHome } from './gate.ts'
 import type { Dispatcher } from './dispatch.ts'
 import { STATUS, type Card } from './types.ts'
 
@@ -25,13 +25,15 @@ export interface PlanOptions {
 export interface PlanSummary {
   planned: number
   failed: number
+  /** 父卡因為子卡還沒完成而還沒輪到規劃 */
+  waiting: number
   stoppedByLimit: boolean
   costUsd: number
 }
 
 export async function planAll(opts: PlanOptions): Promise<PlanSummary> {
   const log = opts.log ?? ((l: string) => console.log(l))
-  const s: PlanSummary = { planned: 0, failed: 0, stoppedByLimit: false, costUsd: 0 }
+  const s: PlanSummary = { planned: 0, failed: 0, waiting: 0, stoppedByLimit: false, costUsd: 0 }
 
   const all = await listCards(opts.boardDir)
   const pending = all
@@ -45,6 +47,19 @@ export async function planAll(opts: PlanOptions): Promise<PlanSummary> {
   log(`「規劃中」有 ${pending.length} 張卡。`)
 
   for (const card of pending) {
+    // 父卡的工作是整合子卡的**實際產出**，所以在子卡完成之前根本規劃不了 ——
+    // 那時要串接的介面還不存在，PM 只能瞎猜。這跟閘門用的是同一條規則
+    // （父卡等子卡「完成」），只是提早到規劃階段。
+    //
+    // 實跑驗證過：不擋的話 PM 自己會停手回報「三個子模組完全不存在」。
+    // 它的判斷是對的，但那要花一次 Opus 呼叫才換到一句我們早就知道的話。
+    const waitingOn = children(card, all).filter((c) => c.status !== STATUS.完成)
+    if (waitingOn.length > 0) {
+      log(`⏸  ${card.id} ${card.title} —— 等子卡完成：${waitingOn.map((c) => c.id).join('、')}`)
+      s.waiting++
+      continue
+    }
+
     // 規劃階段唯一必要的前提是知道要在哪個 repo 研究。
     // 其餘欄位由閘門在進「待執行」時把關，這裡不重複檢查。
     if (!card.runner) {

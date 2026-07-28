@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import { loadAgents } from '../src/agents.ts'
 import { readCard } from '../src/board.ts'
 import { LocalDispatcher } from '../src/dispatch.ts'
+import { planAll } from '../src/plan.ts'
 import { drain } from '../src/runner.ts'
 import { run } from '../src/shell.ts'
 import { makeFixture, verifyScript, type Step } from './helpers/fixture.ts'
@@ -502,4 +503,46 @@ test('手動標記完成的子卡沒有成果分支時，說出來而不是當�
 
   assert.equal(summary.done, 1, '不該因為缺分支就整個失敗')
   assert.match(log, /沒有成果分支/, '要讓人知道 plan 可能假設了不存在的東西')
+})
+
+// ── 父卡的規劃時機 ──────────────────────────────────────────────────────
+//
+// 實跑撞出來的：父卡要串接的是子卡的**實際介面**，子卡沒做完那些介面
+// 還不存在，PM 只能瞎猜。閘門已經擋在執行階段，規劃階段也要擋。
+
+test('子卡沒完成時，父卡不送去規劃，也不花錢', async () => {
+  const fx = await makeFixture({
+    files: { pattern: 'x' },
+    verify: VERIFY,
+    status: '規劃中',
+    extraCards: [{ id: 'TASK-1.1', status: '待執行', parent: 'TASK-1' }],
+    steps: [says('# Plan\n照做')],
+  })
+
+  const lines: string[] = []
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), (l) => lines.push(l))
+  const s = await planAll({ boardDir: fx.boardDir, dispatch: d, log: (l) => lines.push(l) })
+
+  assert.equal(s.waiting, 1, lines.join('\n'))
+  assert.equal(s.planned, 0)
+  assert.equal((await fx.calls()).length, 0, '等子卡就不該呼叫 PM')
+  assert.equal((await readCard(fx.cardPath)).status, '規劃中', '留在原地，不改狀態')
+})
+
+test('子卡都完成後，父卡才輪到規劃', async () => {
+  const fx = await makeFixture({
+    files: { pattern: 'x' },
+    verify: VERIFY,
+    status: '規劃中',
+    extraCards: [{ id: 'TASK-1.1', status: '完成', parent: 'TASK-1' }],
+    steps: [says('# Plan\n把子模組串起來')],
+  })
+
+  const lines: string[] = []
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), (l) => lines.push(l))
+  const s = await planAll({ boardDir: fx.boardDir, dispatch: d, log: (l) => lines.push(l) })
+
+  assert.equal(s.waiting, 0, lines.join('\n'))
+  assert.equal(s.planned, 1)
+  assert.equal((await readCard(fx.cardPath)).status, '設計待批准')
 })

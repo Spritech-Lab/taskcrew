@@ -62,7 +62,7 @@ export async function serve(opts: ServeOptions): Promise<void> {
       try {
         if (cmd.type === 'plan') {
           const s = await planAll({ boardDir, dispatch, log })
-          log(`規劃完成：${s.planned} 張，花費 $${s.costUsd.toFixed(2)}`)
+          log(`規劃完成：${s.planned} 張、等子卡 ${s.waiting} 張，花費 $${s.costUsd.toFixed(2)}`)
         } else {
           const s = await drain({ boardDir, dispatch, log })
           log(`排空完成：完成 ${s.done}、未通過 ${s.failed}，花費 $${s.costUsd.toFixed(2)}`)
