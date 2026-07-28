@@ -260,19 +260,32 @@ A run ends for exactly two reasons: the queue is empty, or the subscription limi
 | 1 | Minimal chain: card → agent → verify → write back | ✅ |
 | 2 | Four-role pipeline, three-loop escalation | ✅ |
 | 3 | Resident agents, command queue, live event stream | ✅ |
-| 4 | Postgres execution history | |
-| 5 | Parent/child cards: integration + whole-milestone verification | |
+| 4 | Parent/child cards: integration + whole-milestone verification | ✅ |
+| 5 | Postgres execution history | |
 
 ## Development
 
 ```bash
-npm test          # 73 tests; integration tests stub the agent for determinism
+npm test          # 88 tests; integration tests stub the agent for determinism
                   # 6 of them need Redis and skip automatically when it's absent
 ```
 
 Control flow is pinned down with a fake `claude` binary — escalation logic can't be tested
 reliably against real agents, which behave differently every run. Real agents are reserved
 for what a stub can't verify: prompt quality.
+
+Load-bearing mechanisms are checked by mutation testing: break the mechanism on purpose and
+confirm a test fails. It has caught three vacuous tests that passed no matter what the code did.
+
+## Design
+
+[`docs/DESIGN.md`](docs/DESIGN.md) (Traditional Chinese) explains **why** each mechanism is
+shaped the way it is — the trade-offs behind the gate, the failure-shape classification, the
+REVISE/REPLACE split, and what session continuity buys and costs.
+
+Sections marked ⚑ were rewritten by real runs rather than reasoned out in advance. Two
+end-to-end runs against live models are recorded in §18, including the bugs they exposed —
+several of which failed silently and would not have surfaced any other way.
 
 ## License
 
