@@ -25,8 +25,8 @@ const NS = 'taskcrew'
  * 依 board 隔離的鍵前綴。
  *
  * **這是 firewall 的一部分，不只是整潔問題。** 沒有它，任何 agent 行程都會
- * 消費任何 board 的派工 —— 騰達的 agent 會撿走 spritech 的工作，在錯的 repo
- * 裡執行。實測時就發生過：背景跑著的 agent 把測試的派工搶去用真的模型執行。
+ * 消費任何 board 的派工 —— 你工作用的 agent 會撿走個人專案的工作，在錯的
+ * repo 裡執行。實測時就發生過：背景跑著的 agent 把測試的派工搶去用真的模型執行。
  *
  * 用 board 絕對路徑的雜湊，不用 config 裡的名字 —— 兩個 board 可能同名，
  * 但路徑不會重複。
