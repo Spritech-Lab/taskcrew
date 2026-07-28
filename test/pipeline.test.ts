@@ -546,3 +546,92 @@ test('子卡都完成後，父卡才輪到規劃', async () => {
   assert.equal(s.planned, 1)
   assert.equal((await readCard(fx.cardPath)).status, '設計待批准')
 })
+
+// ── 下游什麼時候可以開工 ─────────────────────────────────────────────────
+//
+// 預設不等人。一條四張卡的依賴鏈若每段都要人點一次，無人看管執行就失去意義 ——
+// 晚上掛著跑，早上看到的會是「做完 1 張，卡住 3 張」。
+
+/** 造一個「跑完且通過」的上游：狀態在執行完成回報，而且有成果分支。 */
+async function upstreamPassed(repoDir: string, id: string): Promise<void> {
+  await run('git', ['branch', '-f', `task/${id.toLowerCase()}`, 'main'], { cwd: repoDir })
+}
+
+test('依賴跑完且通過就放行，不必等人驗', async () => {
+  const fx = await makeFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    dependencies: ['TASK-9'],
+    extraCards: [{ id: 'TASK-9', status: '執行完成回報', repo: true }],
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+  await upstreamPassed(fx.repoDir, 'TASK-9')
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  const s = await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+  assert.equal(s.done, 1)
+  assert.equal(s.blocked, 0, '通過的上游不該擋住下游')
+})
+
+test('依賴停在執行完成回報但沒有成果分支（跑失敗）→ 擋住', async () => {
+  // 失敗的卡也停在「執行完成回報」—— 那一欄的意思是「球在你手上」，不是「成功了」。
+  // 分辨兩者的機械證據只有成果分支存不存在。
+  const fx = await makeFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    dependencies: ['TASK-9'],
+    extraCards: [{ id: 'TASK-9', status: '執行完成回報', repo: true }],
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+  // 刻意不建 task/task-9
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  const s = await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+  assert.equal(s.blocked, 1, '失敗的上游不能放行下游')
+  assert.equal((await fx.calls()).length, 0)
+})
+
+test('上游標了 require_review 就退回舊行為：一定要你驗過', async () => {
+  const fx = await makeFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    dependencies: ['TASK-9'],
+    extraCards: [
+      { id: 'TASK-9', status: '執行完成回報', repo: true, requireReview: true },
+    ],
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+  await upstreamPassed(fx.repoDir, 'TASK-9') // 跑完了、也通過了
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  const s = await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+  assert.equal(s.blocked, 1, 'require_review 的地基就是要等人')
+  assert.equal((await fx.calls()).length, 0)
+})
+
+test('同一次排空裡，上游剛跑完下游就接著跑 —— 整晚跑得下去的關鍵', async () => {
+  // 這條是這整組改動的理由。上游在這一輪才進「執行完成回報」，
+  // 下游必須在**同一輪**看到它已經好了，而不是等下次排空。
+  const fx = await makeFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    extraCards: [
+      { id: 'TASK-2', status: '待執行', repo: true, dependencies: ['TASK-1'] },
+    ],
+    steps: [
+      writes('aaa'), says('減完了'), says('符合要求'),   // TASK-1
+      writes('aaa'), says('減完了'), says('符合要求'),   // TASK-2
+    ],
+  })
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  const s = await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+  assert.equal(s.done, 2, '兩張都要在同一輪做完')
+  assert.equal(s.blocked, 0)
+
+  // 而且下游要真的從上游的成果長出來，不是從 main
+  const merged = await run('git', ['merge-base', '--is-ancestor', 'task/task-1', 'task/task-2'], {
+    cwd: fx.repoDir,
+  })
+  assert.equal(merged.code, 0, '下游的分支必須含有上游的成果')
+})

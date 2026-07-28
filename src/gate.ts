@@ -72,18 +72,47 @@ export async function checkGate(
 
   // 7. 依賴與子卡 —— 放在最後，因為「還沒輪到」跟「不合格」是兩回事
   const byId = new Map(allCards.map((c) => [c.id, c]))
-  const waitingOn = [
-    ...card.dependencies.filter((id) => byId.get(id)?.status !== '完成'),
-    // 父卡的工作是**整合子卡的成果**，所以它必須等到最後一張子卡也被你驗過。
-    // 條件是「完成」不是「執行完」—— 若某張子卡的產出其實不對，
-    // 整合它只會把錯的東西合進來。
-    ...children(card, allCards)
-      .filter((c) => c.status !== '完成')
-      .map((c) => c.id),
+  const upstream = [
+    ...card.dependencies.map((id) => byId.get(id) ?? id),
+    // 父卡的工作是整合子卡的成果，所以每張子卡都要先有成果可整合。
+    ...children(card, allCards),
   ]
+  const waitingOn: string[] = []
+  for (const u of upstream) {
+    if (typeof u === 'string') {
+      waitingOn.push(u) // 依賴指向一張不存在的卡
+    } else if (!(await satisfiesDownstream(u))) {
+      waitingOn.push(u.id)
+    }
+  }
   if (waitingOn.length > 0) return { kind: 'blocked', waitingOn: [...new Set(waitingOn)] }
 
   return { kind: 'pass' }
+}
+
+/**
+ * 這張卡是否已經可以讓下游（依賴它的卡、以它為子卡的父卡）開工。
+ *
+ * 預設「執行完成回報 + 有成果分支」就算數 —— 那代表測試逐條過了、QA 也過了，
+ * 介面是真的、能被下游 import。**不預設等人**，因為一條四張卡的依賴鏈會變成
+ * 要人醒來四次，那讓無人看管執行整個失去意義。
+ *
+ * 為什麼要多看一次分支：**失敗的卡也停在「執行完成回報」**（那一欄的意思是
+ * 「球在你手上」，不是「成功了」）。成果分支只在產線通過時才會被指過去，
+ * 所以它是「這張卡真的產出了可用的東西」唯一機械可查的證據。
+ *
+ * 「完成」則不查分支 —— 那是你親口說的，而且看板可以手動拖，一張沒跑過的卡
+ * 被拖到完成是正常情境（runner 會退回 base_branch 並發出 missing-ref）。
+ */
+export async function satisfiesDownstream(card: Card): Promise<boolean> {
+  if (card.status === '完成') return true
+  if (card.status !== '執行完成回報') return false
+  if (card.runner?.require_review) return false
+  if (!card.runner) return false
+  const repo = expandHome(card.runner.project)
+  return (
+    await git(repo, ['rev-parse', '--verify', '--quiet', `task/${card.id.toLowerCase()}`])
+  ).code === 0
 }
 
 /**

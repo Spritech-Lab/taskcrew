@@ -159,7 +159,14 @@ function parseRunnerConfig(section: string | undefined): RunnerConfig | null {
     return null
   }
 
-  return { project, base_branch: baseBranch, verify, autonomy }
+  return {
+    project,
+    base_branch: baseBranch,
+    verify,
+    autonomy,
+    // 選填，預設 false。少數卡才需要，不該逼每張卡都寫。
+    require_review: doc.require_review === true,
+  }
 }
 
 function asStringArray(v: unknown): string[] {

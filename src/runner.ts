@@ -3,7 +3,7 @@ import type { Dispatcher } from './dispatch.ts'
 import { acceptedBranch } from './pipeline.ts'
 import { expandHome } from './gate.ts'
 import { git } from './shell.ts'
-import { checkGate, children } from './gate.ts'
+import { checkGate, children, satisfiesDownstream } from './gate.ts'
 import { runPipeline } from './pipeline.ts'
 import { STATUS, type Card } from './types.ts'
 
@@ -142,8 +142,12 @@ async function baseRefFor(
   d: Dispatcher,
 ): Promise<string> {
   const fallback = card.runner!.base_branch
-  const done = card.dependencies.filter((id) => all.find((c) => c.id === id)?.status === '完成')
-  const last = done[done.length - 1]
+  const ready: string[] = []
+  for (const id of card.dependencies) {
+    const dep = all.find((c) => c.id === id)
+    if (dep && (await satisfiesDownstream(dep))) ready.push(id)
+  }
+  const last = ready[ready.length - 1]
   if (!last) return fallback
 
   // 「完成」不保證有成果分支 —— 看板是人可以編輯的，你隨時可能手動把一張卡

@@ -33,6 +33,8 @@ export interface FixtureOptions {
   verify: string
   autonomy?: string
   status?: string
+  /** 主卡的 require_review */
+  requireReview?: boolean
   /** 覆寫卡片的內文區塊 */
   sections?: Partial<Record<'Description' | 'Acceptance Criteria' | 'Implementation Plan', string>>
   /** board 層的 agent 定義覆寫。key 是檔名，例如 'qa.md' */
@@ -47,6 +49,9 @@ export interface FixtureOptions {
     repo?: boolean
     verify?: string
     ac?: string
+    /** 下游要等人親自驗過 */
+    requireReview?: boolean
+    dependencies?: string[]
   }[]
   dependencies?: string[]
 }
@@ -101,6 +106,7 @@ export async function makeFixture(o: FixtureOptions): Promise<Fixture> {
       repoDir,
       verify: o.verify,
       autonomy: o.autonomy ?? 'none',
+      requireReview: o.requireReview,
       sections: o.sections ?? {},
     }),
     'utf8',
@@ -122,11 +128,12 @@ export async function makeFixture(o: FixtureOptions): Promise<Fixture> {
       ? card({
           id: extra.id,
           status: extra.status,
-          dependencies: [],
+          dependencies: extra.dependencies ?? [],
           repoDir,
           verify: extra.verify ?? o.verify,
           autonomy: 'none',
           parent: extra.parent,
+          requireReview: extra.requireReview,
           sections: extra.ac ? { 'Acceptance Criteria': extra.ac } : {},
         })
       : head
@@ -186,6 +193,7 @@ function card(o: {
   verify: string
   autonomy: string
   parent?: string
+  requireReview?: boolean
   sections: Partial<Record<string, string>>
 }): string {
   const deps = o.dependencies.length ? `\n${o.dependencies.map((d) => `  - ${d}`).join('\n')}` : ' []'
@@ -204,7 +212,7 @@ dependencies:${deps}${o.parent ? `\nparent_task_id: ${o.parent}` : ''}
 project: ${o.repoDir}
 base_branch: main
 verify: ${JSON.stringify(o.verify)}
-autonomy: ${o.autonomy}
+autonomy: ${o.autonomy}${o.requireReview ? '\nrequire_review: true' : ''}
 \`\`\`
 <!-- RUNNER:END -->
 

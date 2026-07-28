@@ -46,6 +46,17 @@ export interface RunnerConfig {
   /** 驗收指令。必須產出逐條結果，不能只有 exit code */
   verify: string
   autonomy: Autonomy
+  /**
+   * 下游要等你親自驗過才准開始。預設 false。
+   *
+   * 預設之所以是「不等」：卡跑到「執行完成回報」代表測試逐條過了、QA 也過了，
+   * 介面是真的、能被下游 import。這時停下來等人，換到的是一個「可能發生、
+   * 代價有界（一張卡的 token，分支還留著）」的保險，付出的是「必然發生、
+   * 代價是整晚產能」的損失 —— 一條四張卡的依賴鏈會需要你醒來四次。
+   *
+   * 標成 true 的時機：這張卡是別人的地基，而且錯了下游全廢。
+   */
+  require_review: boolean
 }
 
 export interface Card {
