@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, realpath, writeFile } from 'node:fs/promises'
 import { test } from 'node:test'
 import { loadAgents } from '../src/agents.ts'
 import { readCard } from '../src/board.ts'
@@ -219,20 +219,57 @@ test('通過才 commit，而且只在專用分支上 —— base_branch 不被�
   assert.equal(onBranch.stdout.trim(), 'aaa')
 })
 
-test('未通過就不 commit —— 分支上留著工作區改動，但沒有 commit', async () => {
+test('未通過不會產出成果分支，但殘骸留在它自己的分支上', async () => {
+  // 原本的做法是「失敗就完全不 commit，改動留在工作區」。那是錯的：
+  // `git checkout -B 新分支 base` 會把未提交的變更**一起帶到下一張卡的分支**，
+  // 於是一張失敗的卡會悄悄污染下一張。殘骸要留，但要留在它自己的分支上。
   const { fx } = await runFixture({
     files: { pattern: 'xxx' },
     verify: VERIFY,
     steps: [writes('axx'), writes('axx')],
   })
 
-  const log = await run('git', ['log', '--oneline', 'task/task-1-attempt-1'], {
+  // 失敗不能看起來像成功 —— 下游認的是這個名字
+  const accepted = await run('git', ['rev-parse', '--verify', '--quiet', 'task/task-1'], {
     cwd: fx.repoDir,
   })
-  assert.equal(log.stdout.trim().split('\n').length, 1, '只該有 init 那一個 commit')
+  assert.notEqual(accepted.code, 0, '沒通過就不該有成果分支')
 
-  // 但改動留著，人可以去看它做到哪
-  assert.equal((await readFile(`${fx.repoDir}/pattern`, 'utf8')).trim(), 'axx')
+  // 但做到哪裡要看得到，而且是在它自己的分支上
+  const residue = await run('git', ['show', 'task/task-1-attempt-1:pattern'], { cwd: fx.repoDir })
+  assert.equal(residue.stdout.trim(), 'axx', '殘骸要 commit 在該卡的分支上留作線索')
+
+  // 而且 repo 收回乾淨的起點，不會把東西帶給下一張卡
+  const branch = await run('git', ['branch', '--show-current'], { cwd: fx.repoDir })
+  assert.equal(branch.stdout.trim(), 'main')
+  const status = await run('git', ['status', '--porcelain'], { cwd: fx.repoDir })
+  assert.equal(status.stdout.trim(), '', '工作區要乾淨')
+})
+
+test('前一張卡的殘骸不會被帶到下一張卡的分支上', async () => {
+  // 這是上面那條的真正代價，值得單獨釘死：兩張卡連著跑，第一張失敗。
+  const fx = await makeFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    extraCards: [{ id: 'TASK-2', status: '待執行', repo: true }],
+    steps: [
+      // TASK-1 失敗，留下一個 junk 檔案在工作區（沒 commit）
+      { text: '做完了', cost: 0.01, apply: { pattern: 'axx', junk: 'TASK-1 的殘骸' } },
+      { text: '做完了', cost: 0.01, apply: { pattern: 'axx' } },
+      says('HANDBACK: 需求本身有洞'), // PM 交回人，TASK-1 到此為止
+      // TASK-2 成功，而且完全不碰 junk
+      writes('aaa'), says('減完了'), says('符合要求'),
+    ],
+  })
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+
+  // TASK-1 留下的 junk 檔案完全不該出現在 TASK-2 的成果裡。
+  // 用一個 TASK-2 不會碰的檔案才看得出洩漏 —— 兩張卡都會動的檔案
+  // 會被後面那張覆蓋掉，洩漏就藏起來了。
+  const leaked = await run('git', ['cat-file', '-e', 'task/task-2:junk'], { cwd: fx.repoDir })
+  assert.notEqual(leaked.code, 0, 'TASK-1 的殘骸不該出現在 TASK-2 的分支上')
 })
 
 // ── 修正 vs 換方案 ──────────────────────────────────────────────────────
@@ -652,4 +689,100 @@ test('子卡跑完通過（還沒人驗）就足以讓父卡進規劃', async ()
   const s = await planAll({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
   assert.equal(s.waiting, 0)
   assert.equal(s.planned, 1)
+})
+
+// ── 規劃時 PM 站在哪 ────────────────────────────────────────────────────
+//
+// 實跑撞出來的：PM 規劃父卡時 repo 還停在上一張卡留下的 attempt 分支，
+// 它看到兩個子模組、看不到第三個，於是停手回報「truncate 不存在」。
+// 觀察是對的，錯的是我沒把它放在對的地方。
+
+test('父卡規劃時，PM 看得到所有子卡的成果合在一起', async () => {
+  const fx = await makeFixture({
+    files: { base: 'x' },
+    verify: VERIFY,
+    status: '規劃中',
+    extraCards: [
+      { id: 'TASK-1.1', status: '執行完成回報', repo: true, parent: 'TASK-1' },
+      { id: 'TASK-1.2', status: '執行完成回報', repo: true, parent: 'TASK-1' },
+    ],
+    steps: [says('# Plan\n串起來')],
+  })
+
+  // 兩張子卡各自在不同檔案上留下成果
+  for (const [id, file] of [['1.1', 'a.js'], ['1.2', 'b.js']] as const) {
+    await run('git', ['checkout', '-q', '-B', `task/task-${id}`, 'main'], { cwd: fx.repoDir })
+    await writeFile(`${fx.repoDir}/${file}`, 'x', 'utf8')
+    await run('git', ['add', '-A'], { cwd: fx.repoDir })
+    await run('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', id], {
+      cwd: fx.repoDir,
+    })
+  }
+  // repo 停在一條只看得到 b.js 的分支 —— 這正是實跑時的狀況
+  await run('git', ['checkout', '-q', 'task/task-1.2'], { cwd: fx.repoDir })
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  await planAll({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+
+  const seen = (await fx.calls())[0]?.files ?? []
+  assert.ok(seen.includes('a.js'), `PM 要看得到 a.js，實際看到 ${JSON.stringify(seen)}`)
+  assert.ok(seen.includes('b.js'), `PM 要看得到 b.js，實際看到 ${JSON.stringify(seen)}`)
+})
+
+test('規劃不會改動 repo 的狀態 —— 規劃是唯讀的', async () => {
+  const fx = await makeFixture({
+    files: { base: 'x' },
+    verify: VERIFY,
+    status: '規劃中',
+    steps: [says('# Plan\n做吧')],
+  })
+  await run('git', ['checkout', '-q', '-b', '我在這條上工作'], { cwd: fx.repoDir })
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  await planAll({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+
+  const pm = (await fx.calls())[0]
+  // macOS 的 tmpdir 是 symlink，兩邊都要 realpath 才比得準
+  assert.notEqual(pm?.cwd, await realpath(fx.repoDir), 'PM 要在 worktree 裡工作，不能站在 repo 上')
+
+  const after = await run('git', ['branch', '--show-current'], { cwd: fx.repoDir })
+  assert.equal(after.stdout.trim(), '我在這條上工作', '規劃完 repo 要停在原本的地方')
+  const wt = await run('git', ['worktree', 'list'], { cwd: fx.repoDir })
+  assert.equal(wt.stdout.trim().split('\n').length, 1, '暫時的 worktree 要拆乾淨')
+})
+
+test('父卡有兩張以上子卡時，每一張的成果都要合進來', async () => {
+  // 這條是為了釘死一個真的踩過的 bug：用 `merge --no-commit` 迴圈的話，
+  // 第一次合併留下未結束的合併狀態，第二個 merge 被 git 拒絕 ——
+  // 而且是**悄悄地**失敗，agent 拿到一個看起來正常但少了東西的工作區。
+  const fx = await makeFixture({
+    files: { pattern: 'aa' },
+    verify: VERIFY,
+    sections: { 'Acceptance Criteria': '- [ ] #1 整體 → `test/run.js::t0`' },
+    extraCards: [
+      { id: 'TASK-1.1', status: '完成', parent: 'TASK-1' },
+      { id: 'TASK-1.2', status: '完成', parent: 'TASK-1' },
+    ],
+    steps: [says('整合完了'), says('減完了'), says('符合要求')],
+  })
+
+  for (const [id, file] of [['1.1', 'from-a'], ['1.2', 'from-b']] as const) {
+    await run('git', ['checkout', '-q', '-B', `task/task-${id}`, 'main'], { cwd: fx.repoDir })
+    await writeFile(`${fx.repoDir}/${file}`, 'x', 'utf8')
+    await run('git', ['add', '-A'], { cwd: fx.repoDir })
+    await run('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', id], {
+      cwd: fx.repoDir,
+    })
+  }
+  await run('git', ['checkout', '-q', 'main'], { cwd: fx.repoDir })
+
+  const lines: string[] = []
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), (l) => lines.push(l))
+  const s = await drain({ boardDir: fx.boardDir, dispatch: d, log: (l) => lines.push(l) })
+  assert.equal(s.done, 1, lines.join('\n'))
+
+  for (const f of ['from-a', 'from-b']) {
+    const r = await run('git', ['cat-file', '-e', `task/task-1:${f}`], { cwd: fx.repoDir })
+    assert.equal(r.code, 0, `${f} 要在父卡的成果裡`)
+  }
 })

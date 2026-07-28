@@ -16,18 +16,36 @@
  * 每被呼叫一次就消費一步。`apply` 讓假 agent 能真的改檔案 ——
  * 沒有這個，跨輪的測試結果不會變，也就測不出失敗形狀。
  */
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 // 腳本放在**目標 repo 裡**，不是全域環境變數 —— 一個測試可能同時開兩個
 // fixture（例如驗證兩個 board 的隔離），全域狀態會讓它們互相蓋掉。
-// cwd 是 invoke() 設定的目標 repo，所以每個 fixture 自然有自己的腳本。
-const scriptPath = resolve(process.cwd(), '.tc-fake.json')
+// 腳本與呼叫紀錄放在 fixture 自己的 repo 目錄裡。
+//
+// 不能直接用 cwd：規劃階段 agent 是在暫時的 worktree 裡跑的，那裡沒有這些檔案。
+// 也不能用環境變數烤進 shim —— PATH 是全域的，兩個 fixture 會共用同一個 shim。
+// 問 git「主 worktree 在哪」兩種情況都答得出來，而且不依賴任何全域狀態。
+const stateDir = mainWorktree(process.cwd())
+
+function mainWorktree(cwd) {
+  try {
+    const common = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd,
+      encoding: 'utf8',
+    }).trim()
+    return dirname(common)
+  } catch {
+    return cwd
+  }
+}
+const scriptPath = resolve(stateDir, '.tc-fake.json')
 let steps
 try {
   steps = JSON.parse(readFileSync(scriptPath, 'utf8'))
 } catch {
-  console.error(`fake-claude: 在 ${process.cwd()} 找不到 .tc-fake.json`)
+  console.error(`fake-claude: 在 ${stateDir} 找不到 .tc-fake.json`)
   process.exit(2)
 }
 
@@ -50,7 +68,7 @@ writeFileSync(cursorPath, String(i + 1), 'utf8')
 
 // 記錄這次呼叫用了哪個模型 —— 測試用它確認角色路由正確
 // （例如「第二輪真的換成 senior 了嗎」）
-const logPath = join(process.cwd(), '.tc-fake-calls.jsonl')
+const logPath = join(stateDir, '.tc-fake-calls.jsonl')
 {
   const modelIdx = process.argv.indexOf('--model')
   const effortIdx = process.argv.indexOf('--effort')
@@ -63,6 +81,10 @@ const logPath = join(process.cwd(), '.tc-fake-calls.jsonl')
       effort: effortIdx > 0 ? process.argv[effortIdx + 1] : null,
       // 測試靠這個確認「換方案時重置、其餘延續」有沒有做對
       resume: resumeIdx > 0 ? process.argv[resumeIdx + 1] : null,
+      // agent 站在哪裡、看得到什麼。規劃階段用它確認 PM 真的看到了
+      // 該看的東西（例如父卡要整合的所有子卡成果）
+      cwd: process.cwd(),
+      files: readdirSync(process.cwd()).filter((f) => !f.startsWith('.')),
     }) + '\n',
     'utf8',
   )

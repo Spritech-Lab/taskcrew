@@ -3,6 +3,7 @@ import { isRateLimited } from './claude.ts'
 import { children, expandHome, satisfiesDownstream } from './gate.ts'
 import type { Dispatcher } from './dispatch.ts'
 import { STATUS, type Card } from './types.ts'
+import { baseRefFor, mergeRefsFor, withWorktree } from './workspace.ts'
 
 /**
  * PM 的規劃階段：把「規劃中」的卡變成「設計待批准」。
@@ -78,7 +79,18 @@ export async function planAll(opts: PlanOptions): Promise<PlanSummary> {
 
     log(`▸  ${card.id} ${card.title}`)
     const repo = expandHome(card.runner.project)
-    const r = await opts.dispatch.invoke('pm', planPrompt(card), repo)
+
+    // PM 要看的是 **RD 將會站的地方**，不是 repo 當下剛好停在哪。
+    // 用暫時的 worktree 而不是 checkout：規劃是唯讀的工作，不該改動 repo 狀態。
+    const base = await baseRefFor(card, all, repo, (ref, fallback) =>
+      log(`   ⚠ 依賴的成果分支 ${ref} 不存在，改用 ${fallback}`),
+    )
+    const merges = await mergeRefsFor(card, all, repo)
+    if (merges.length > 0) log(`   合入子卡成果：${merges.join('、')}`)
+
+    const r = await withWorktree(repo, base, merges, (dir) =>
+      opts.dispatch.invoke('pm', planPrompt(card), dir),
+    )
     s.costUsd += r.costUsd ?? 0
 
     if (isRateLimited(r)) {

@@ -7,6 +7,7 @@ import { analyze, describe, shouldEscalate } from './shape.ts'
 import { git } from './shell.ts'
 import type { Autonomy, Card, TestResult } from './types.ts'
 import { passed, scopeToCard, summarize, testRefs, verify } from './verify.ts'
+import { mergeAll, settle } from './workspace.ts'
 
 /**
  * 一張卡的完整產線。
@@ -99,6 +100,18 @@ export async function runPipeline(
   card: Card,
   opts: PipelineOptions,
 ): Promise<PipelineResult> {
+  const repo = expandHome(card.runner!.project)
+  try {
+    return await run(card, opts)
+  } finally {
+    // 不管是通過、失敗、還是撞額度，repo 都要收回乾淨的起點。
+    // 尤其是失敗那條路徑：沒 commit 的殘骸會被下一張卡的 checkout 帶走。
+    const had = await settle(repo, card.runner!.base_branch)
+    if (had) opts.dispatch.emit({ type: 'residue-committed', card: card.id })
+  }
+}
+
+async function run(card: Card, opts: PipelineOptions): Promise<PipelineResult> {
   const cfg = card.runner!
   const repo = expandHome(cfg.project)
   const d = opts.dispatch
@@ -128,11 +141,9 @@ export async function runPipeline(
 
     // 父卡：把子卡的成果合進來，agent 才有東西可以整合。
     // 衝突不自動解 —— 那是整合工作的一部分，交給 agent 在工作區裡處理。
-    for (const ref of opts.mergeRefs ?? []) {
-      const m = await git(repo, ['merge', '--no-commit', '--no-ff', ref])
-      if (m.code !== 0) {
-        d.emit({ type: 'merge-conflict', card: card.id, attempt: attemptNo, ref })
-      }
+    const merged = await mergeAll(repo, opts.mergeRefs ?? [])
+    if (merged.conflicted) {
+      d.emit({ type: 'merge-conflict', card: card.id, attempt: attemptNo, ref: merged.conflicted })
     }
 
     // ── 修正迴圈：同一個方案、同一條分支，只換 plan ──

@@ -20,7 +20,15 @@ export interface Fixture {
   repoDir: string
   cardPath: string
   /** 假 agent 每次呼叫收到的 --model / --effort，用來確認角色路由 */
-  calls(): Promise<{ model: string | null; effort: string | null; resume: string | null }[]>
+  calls(): Promise<
+    {
+      model: string | null
+      effort: string | null
+      resume: string | null
+      cwd: string
+      files: string[]
+    }[]
+  >
   card(): Promise<string>
 }
 
