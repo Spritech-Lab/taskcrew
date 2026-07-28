@@ -635,3 +635,21 @@ test('同一次排空裡，上游剛跑完下游就接著跑 —— 整晚跑得
   })
   assert.equal(merged.code, 0, '下游的分支必須含有上游的成果')
 })
+
+test('子卡跑完通過（還沒人驗）就足以讓父卡進規劃', async () => {
+  // 這條跟排空那組同源：規劃階段的擋板也不該預設等人，
+  // 否則父卡的 plan 要等你點過三次才產得出來。
+  const fx = await makeFixture({
+    files: { pattern: 'x' },
+    verify: VERIFY,
+    status: '規劃中',
+    extraCards: [{ id: 'TASK-1.1', status: '執行完成回報', repo: true, parent: 'TASK-1' }],
+    steps: [says('# Plan\n把子模組串起來')],
+  })
+  await run('git', ['branch', '-f', 'task/task-1.1', 'main'], { cwd: fx.repoDir })
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  const s = await planAll({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+  assert.equal(s.waiting, 0)
+  assert.equal(s.planned, 1)
+})
