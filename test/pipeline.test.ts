@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { test } from 'node:test'
 import { loadAgents } from '../src/agents.ts'
 import { readCard } from '../src/board.ts'
@@ -438,4 +438,68 @@ test('一張卡不會被別張卡的測試擋住 —— 只看自己驗收條件
   })
 
   assert.equal(summary.done, 1, 't0 過了就該算過，不該被 t1/t2 擋住')
+})
+
+// ── 父子卡 ──────────────────────────────────────────────────────────────
+//
+// 父卡的工作是**整合**：等所有子卡被你驗過，把它們的成果合起來，
+// 跑只有合起來才驗得到的整體驗收。
+
+test('父卡在子卡完成前被擋住，而且不呼叫任何 agent', async () => {
+  const { fx, summary } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    // TASK-1 是父卡（fixture 的主卡），TASK-1.1 是還沒完成的子卡
+    extraCards: [{ id: 'TASK-1.1', status: '待執行', parent: 'TASK-1' }],
+    steps: [],
+  })
+
+  assert.equal(summary.blocked, 1)
+  assert.equal((await fx.calls()).length, 0, '被擋住就不該花任何錢')
+  assert.equal((await readCard(fx.cardPath)).status, '阻塞')
+})
+
+test('子卡全部完成後，父卡把它們的成果合進來再跑整體驗收', async () => {
+  const fx = await makeFixture({
+    files: { pattern: 'xx', other: 'start' },
+    verify: VERIFY,
+    // 父卡的驗收條件只看 t0；子卡負責的是 t1
+    sections: { 'Acceptance Criteria': '- [ ] #1 整體 → `test/run.js::t0`' },
+    extraCards: [{ id: 'TASK-1.1', status: '完成', parent: 'TASK-1' }],
+    steps: [writes('aa'), says('減完了'), says('符合要求')],
+  })
+
+  // 模擬子卡跑完留下的成果分支：它在 other 檔案上做了改動
+  await run('git', ['checkout', '-q', '-b', 'task/task-1.1'], { cwd: fx.repoDir })
+  await writeFile(`${fx.repoDir}/other`, '子卡的成果', 'utf8')
+  await run('git', ['add', '-A'], { cwd: fx.repoDir })
+  await run('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'child'], {
+    cwd: fx.repoDir,
+  })
+  await run('git', ['checkout', '-q', 'main'], { cwd: fx.repoDir })
+
+  const lines: string[] = []
+  const log = (l: string) => lines.push(l)
+  const dispatch = new LocalDispatcher(await loadAgents(fx.boardDir), log)
+  const summary = await drain({ boardDir: fx.boardDir, dispatch, log })
+
+  assert.equal(summary.done, 1, lines.join('\n'))
+
+  // 父卡的分支上要看得到子卡的成果 —— 那就是「整合」的意思
+  const merged = await run('git', ['show', 'task/task-1:other'], { cwd: fx.repoDir })
+  assert.equal(merged.stdout.trim(), '子卡的成果', '子卡的改動要被合進父卡的成果')
+})
+
+test('手動標記完成的子卡沒有成果分支時，說出來而不是當掉', async () => {
+  const { summary, log } = await runFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    dependencies: ['TASK-9'],
+    // 這張卡被人手動拖到「完成」，從沒真的跑過，所以沒有 task/task-9 分支
+    extraCards: [{ id: 'TASK-9', status: '完成' }],
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+
+  assert.equal(summary.done, 1, '不該因為缺分支就整個失敗')
+  assert.match(log, /沒有成果分支/, '要讓人知道 plan 可能假設了不存在的東西')
 })

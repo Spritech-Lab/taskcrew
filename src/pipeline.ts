@@ -79,6 +79,20 @@ export type PipelineResult =
 export interface PipelineOptions {
   /** agent 怎麼被叫起來（本機子行程或走匯流排），以及事件往哪送 */
   dispatch: Dispatcher
+  /**
+   * 分支從哪裡長出來。
+   *
+   * 通常是卡上的 base_branch，但**有依賴的卡要從被依賴的成果長出來** ——
+   * 否則它拿不到自己依賴的東西，plan 裡寫的「呼叫 A 新加的函式」會找不到。
+   */
+  baseRef: string
+  /**
+   * 開工前要合進來的分支（父卡用）。
+   *
+   * 父卡的工作是整合，所以它的起點不是空的 —— 是所有子卡成果的合併。
+   * agent 拿到的是一個已經合好（或有衝突待解）的工作區。
+   */
+  mergeRefs?: readonly string[]
 }
 
 export async function runPipeline(
@@ -101,16 +115,25 @@ export async function runPipeline(
 
     // 換方案 = 從 base_branch 乾淨長出來。舊方案的 code 不繼承 ——
     // 路走錯了，在爛攤子上改只會讓新方案變成舊方案的變體。
-    const co = await git(repo, ['checkout', '-B', branch, cfg.base_branch])
+    const co = await git(repo, ['checkout', '-B', branch, opts.baseRef])
     if (co.code !== 0) {
       return {
         kind: 'failed',
         attempts,
         costUsd: cost,
-        reason: `無法建立分支 ${branch}：${co.stderr.trim()}`,
+        reason: `無法從 ${opts.baseRef} 建立分支 ${branch}：${co.stderr.trim()}`,
       }
     }
     d.emit({ type: 'attempt-start', card: card.id, attempt: attemptNo, branch })
+
+    // 父卡：把子卡的成果合進來，agent 才有東西可以整合。
+    // 衝突不自動解 —— 那是整合工作的一部分，交給 agent 在工作區裡處理。
+    for (const ref of opts.mergeRefs ?? []) {
+      const m = await git(repo, ['merge', '--no-commit', '--no-ff', ref])
+      if (m.code !== 0) {
+        d.emit({ type: 'merge-conflict', card: card.id, attempt: attemptNo, ref })
+      }
+    }
 
     // ── 修正迴圈：同一個方案、同一條分支，只換 plan ──
     let planVersion = 1
@@ -126,7 +149,7 @@ export async function runPipeline(
       cost += attempt.cost
 
       if (attempt.ended === 'passed') {
-        await commit(repo, card)
+        await commit(repo, card, branch)
         await writeNotes(card, attempts)
         return { kind: 'done', attempts, costUsd: cost }
       }
@@ -671,7 +694,7 @@ function attemptBudget(a: Autonomy): number {
   }
 }
 
-async function commit(repo: string, card: Card): Promise<void> {
+async function commit(repo: string, card: Card, branch: string): Promise<void> {
   // 驗收與 QA 都過了才 commit，而且只在本機。push 已被 --disallowed-tools 擋死。
   await git(repo, ['add', '-A'])
   await git(repo, [
@@ -683,6 +706,18 @@ async function commit(repo: string, card: Card): Promise<void> {
     '-m',
     `${card.id}: ${card.title}`,
   ])
+
+  // 通過的成果額外指到一個**穩定的分支名**。
+  //
+  // attempt 分支的編號會變（換方案就 +1），但依賴這張卡的後續工作、
+  // 以及父卡的整合，都需要一個「這張卡最後被接受的成果」的固定名字。
+  // 沒有它，下游只能猜第幾個 attempt 才是對的。
+  await git(repo, ['branch', '-f', acceptedBranch(card.id), branch])
+}
+
+/** 一張卡最後被接受的成果。跟 attempt 分支不同 —— 這個名字不會變。 */
+export function acceptedBranch(cardId: string): string {
+  return `task/${cardId.toLowerCase()}`
 }
 
 function section(card: Card, name: string): string {

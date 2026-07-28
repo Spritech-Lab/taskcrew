@@ -46,6 +46,8 @@ export interface Dispatcher {
 export type PipelineEvent =
   | { type: 'card-start'; card: string; title: string }
   | { type: 'attempt-start'; card: string; attempt: number; branch: string }
+  | { type: 'merge-conflict'; card: string; attempt: number; ref: string }
+  | { type: 'missing-ref'; card: string; ref: string; fallback: string }
   | { type: 'round-start'; card: string; attempt: number; version: number; round: number; role: Role; model: string; effort: string }
   | { type: 'verify'; card: string; attempt: number; version: number; round: number; summary: string; passed: boolean; afterReduction?: boolean }
   | { type: 'reduce-start'; card: string; attempt: number; version: number; round: number }
@@ -113,6 +115,10 @@ export function format(e: PipelineEvent): string | null {
       return `▸  ${e.card} ${e.title}`
     case 'attempt-start':
       return `   [方案 ${e.attempt}] 分支 ${e.branch}`
+    case 'merge-conflict':
+      return `   [方案 ${e.attempt}] 合併 ${e.ref} 有衝突 —— 留給 agent 在工作區處理`
+    case 'missing-ref':
+      return `   ⚠ 依賴的 ${e.ref} 沒有成果分支（多半是手動標記完成的），改從 ${e.fallback} 開始`
     case 'round-start':
       return `   [${tag(e)}] ${e.role} 開發（${e.model} / ${e.effort}）`
     case 'reduce-start':

@@ -70,10 +70,18 @@ export async function checkGate(
 
   if (problems.length > 0) return { kind: 'fail', problems }
 
-  // 7. 依賴 —— 放在最後，因為「還沒輪到」跟「不合格」是兩回事
+  // 7. 依賴與子卡 —— 放在最後，因為「還沒輪到」跟「不合格」是兩回事
   const byId = new Map(allCards.map((c) => [c.id, c]))
-  const waitingOn = card.dependencies.filter((id) => byId.get(id)?.status !== '完成')
-  if (waitingOn.length > 0) return { kind: 'blocked', waitingOn }
+  const waitingOn = [
+    ...card.dependencies.filter((id) => byId.get(id)?.status !== '完成'),
+    // 父卡的工作是**整合子卡的成果**，所以它必須等到最後一張子卡也被你驗過。
+    // 條件是「完成」不是「執行完」—— 若某張子卡的產出其實不對，
+    // 整合它只會把錯的東西合進來。
+    ...children(card, allCards)
+      .filter((c) => c.status !== '完成')
+      .map((c) => c.id),
+  ]
+  if (waitingOn.length > 0) return { kind: 'blocked', waitingOn: [...new Set(waitingOn)] }
 
   return { kind: 'pass' }
 }
@@ -106,6 +114,11 @@ function checkAcceptanceCriteria(section: string): string[] {
 /** 去掉 Backlog.md 的 HTML 區塊標記，只留內容。 */
 function stripMarkers(s: string): string {
   return s.replace(/<!--[\s\S]*?-->/g, '')
+}
+
+/** 這張卡的直接子卡。只允許兩層，所以不需要遞迴。 */
+export function children(card: Card, all: readonly Card[]): Card[] {
+  return all.filter((c) => c.parentTaskId === card.id)
 }
 
 export function expandHome(p: string): string {

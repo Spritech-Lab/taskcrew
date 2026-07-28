@@ -1,6 +1,9 @@
 import { listCards, setStatus } from './board.ts'
 import type { Dispatcher } from './dispatch.ts'
-import { checkGate } from './gate.ts'
+import { acceptedBranch } from './pipeline.ts'
+import { expandHome } from './gate.ts'
+import { git } from './shell.ts'
+import { checkGate, children } from './gate.ts'
 import { runPipeline } from './pipeline.ts'
 import { STATUS, type Card } from './types.ts'
 
@@ -79,7 +82,15 @@ export async function drain(opts: DrainOptions): Promise<DrainSummary> {
     d.emit({ type: 'card-start', card: card.id, title: card.title })
     await setStatus(card, STATUS.執行中)
 
-    const r = await runPipeline(card, { dispatch: d })
+    const repo = expandHome(card.runner!.project)
+    const r = await runPipeline(card, {
+      dispatch: d,
+      baseRef: await baseRefFor(card, all, repo, d),
+      mergeRefs: await existingRefs(
+        children(card, all).map((c) => acceptedBranch(c.id)),
+        repo,
+      ),
+    })
     s.costUsd += r.costUsd
 
     switch (r.kind) {
@@ -112,6 +123,47 @@ export async function drain(opts: DrainOptions): Promise<DrainSummary> {
   }
 
   return s
+}
+
+/**
+ * 這張卡的分支該從哪裡長出來。
+ *
+ * 有依賴就從**最後一個依賴的成果**長出來 —— 依賴的意思就是「我需要它做完的東西」，
+ * 從 base_branch 長出來的話那些東西根本不存在，plan 裡寫的「呼叫 A 新加的函式」
+ * 會直接找不到。多個依賴時取最後一個：它們是鏈狀的（A→B→C），
+ * 最後一個已經含有前面所有人的成果。
+ *
+ * 沒有依賴（含所有父卡）就用卡上寫的 base_branch。
+ */
+async function baseRefFor(
+  card: Card,
+  all: readonly Card[],
+  repo: string,
+  d: Dispatcher,
+): Promise<string> {
+  const fallback = card.runner!.base_branch
+  const done = card.dependencies.filter((id) => all.find((c) => c.id === id)?.status === '完成')
+  const last = done[done.length - 1]
+  if (!last) return fallback
+
+  // 「完成」不保證有成果分支 —— 看板是人可以編輯的，你隨時可能手動把一張卡
+  // 拖到完成而它從沒真的跑過。那時候從 base_branch 長出來是唯一合理的選擇，
+  // 但要說出來：卡片的 plan 可能假設了不存在的東西。
+  const ref = acceptedBranch(last)
+  if (await refExists(ref, repo)) return ref
+  d.emit({ type: 'missing-ref', card: card.id, ref, fallback })
+  return fallback
+}
+
+/** 過濾掉不存在的分支。手動標記完成的子卡沒有成果可合。 */
+async function existingRefs(refs: string[], repo: string): Promise<string[]> {
+  const out: string[] = []
+  for (const r of refs) if (await refExists(r, repo)) out.push(r)
+  return out
+}
+
+async function refExists(ref: string, repo: string): Promise<boolean> {
+  return (await git(repo, ['rev-parse', '--verify', '--quiet', ref])).code === 0
 }
 
 /** 給 CLI 用的：卡在「規劃中」的張數，提醒使用者還有 PM 的工作沒跑。 */

@@ -38,7 +38,16 @@ export interface FixtureOptions {
   /** board 層的 agent 定義覆寫。key 是檔名，例如 'qa.md' */
   agents?: Record<string, string>
   /** 額外的卡（測依賴 / 父子用）。key 是 id 後綴 */
-  extraCards?: { id: string; status: string; frontmatter?: string }[]
+  extraCards?: {
+    id: string
+    status: string
+    /** 這張卡的父卡 */
+    parent?: string
+    /** 這張卡的 Runner Config 指向的 repo（給子卡用） */
+    repo?: boolean
+    verify?: string
+    ac?: string
+  }[]
   dependencies?: string[]
 }
 
@@ -98,11 +107,30 @@ export async function makeFixture(o: FixtureOptions): Promise<Fixture> {
   )
 
   for (const extra of o.extraCards ?? []) {
-    await writeFile(
-      join(boardDir, 'backlog', 'tasks', `task-${extra.id} - x.md`),
-      `---\nid: ${extra.id}\ntitle: x\nstatus: ${extra.status}\nlabels: []\ndependencies: []\n---\n`,
-      'utf8',
-    )
+    const head = [
+      '---',
+      `id: ${extra.id}`,
+      'title: x',
+      `status: ${extra.status}`,
+      'labels: []',
+      'dependencies: []',
+      ...(extra.parent ? [`parent_task_id: ${extra.parent}`] : []),
+      '---',
+      '',
+    ].join('\n')
+    const body = extra.repo
+      ? card({
+          id: extra.id,
+          status: extra.status,
+          dependencies: [],
+          repoDir,
+          verify: extra.verify ?? o.verify,
+          autonomy: 'none',
+          parent: extra.parent,
+          sections: extra.ac ? { 'Acceptance Criteria': extra.ac } : {},
+        })
+      : head
+    await writeFile(join(boardDir, 'backlog', 'tasks', `task-${extra.id} - x.md`), body, 'utf8')
   }
 
   // ── board 層的 agent 覆寫 ──
@@ -157,6 +185,7 @@ function card(o: {
   repoDir: string
   verify: string
   autonomy: string
+  parent?: string
   sections: Partial<Record<string, string>>
 }): string {
   const deps = o.dependencies.length ? `\n${o.dependencies.map((d) => `  - ${d}`).join('\n')}` : ' []'
@@ -165,7 +194,7 @@ id: ${o.id}
 title: t
 status: ${o.status}
 labels: []
-dependencies:${deps}
+dependencies:${deps}${o.parent ? `\nparent_task_id: ${o.parent}` : ''}
 ---
 
 ## Runner Config
