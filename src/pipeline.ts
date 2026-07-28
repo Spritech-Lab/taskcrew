@@ -1,7 +1,7 @@
 import { stripLeadingHeading, upsertSection } from './board.ts'
-import { invoke, isRateLimited, type AgentSpec } from './claude.ts'
+import { isRateLimited } from './claude.ts'
 import { expandHome } from './gate.ts'
-import type { Agents } from './agents.ts'
+import type { Dispatcher } from './dispatch.ts'
 import { describeVerdict, parseVerdict, type QaVerdict } from './qa.ts'
 import { analyze, describe, shouldEscalate } from './shape.ts'
 import { git } from './shell.ts'
@@ -77,9 +77,8 @@ export type PipelineResult =
   | { kind: 'rate-limited'; attempts: AttemptRecord[]; costUsd: number }
 
 export interface PipelineOptions {
-  log: (line: string) => void
-  /** 從 board 載入的 agent 編制。使用者可在 <board>/agents/*.md 覆寫 */
-  agents: Agents
+  /** agent 怎麼被叫起來（本機子行程或走匯流排），以及事件往哪送 */
+  dispatch: Dispatcher
 }
 
 export async function runPipeline(
@@ -88,8 +87,7 @@ export async function runPipeline(
 ): Promise<PipelineResult> {
   const cfg = card.runner!
   const repo = expandHome(cfg.project)
-  const log = opts.log
-  const agents = opts.agents
+  const d = opts.dispatch
 
   const attempts: AttemptRecord[] = []
   const excluded: string[] = []
@@ -112,14 +110,14 @@ export async function runPipeline(
         reason: `無法建立分支 ${branch}：${co.stderr.trim()}`,
       }
     }
-    log(`   [方案 ${attemptNo}] 分支 ${branch}`)
+    d.emit({ type: 'attempt-start', card: card.id, attempt: attemptNo, branch })
 
     // ── 修正迴圈：同一個方案、同一條分支，只換 plan ──
     let planVersion = 1
     let pendingReplacement = ''
 
     while (true) {
-      const attempt = await runAttempt(card, repo, branch, plan, attemptNo, planVersion, log, agents)
+      const attempt = await runAttempt(card, repo, branch, plan, attemptNo, planVersion, d)
       attempts.push(attempt)
       cost += attempt.cost
 
@@ -135,11 +133,11 @@ export async function runPipeline(
 
       // 修正次數用完就不再問「該修還是該換」—— 改到第三版還不行，問題就不在細節
       if (planVersion > MAX_REVISIONS) {
-        log(`   [方案 ${attemptNo}] 修正 ${MAX_REVISIONS} 次仍未通過 → 改為換方案`)
+        d.emit({ type: 'revisions-exhausted', card: card.id, attempt: attemptNo, max: MAX_REVISIONS })
         break
       }
 
-      const pm = await askPm(agents.pm, card, attempt, excluded, repo, 'decide')
+      const pm = await askPm(d, card, attempt, excluded, repo, 'decide')
       cost += pm.cost
       if (pm.rateLimited) return { kind: 'rate-limited', attempts, costUsd: cost }
       if (!pm.decision) {
@@ -172,7 +170,7 @@ export async function runPipeline(
       planVersion++
       plan = pm.decision.plan
       await upsertSection(card, 'Implementation Plan', plan)
-      log(`   [方案 ${attemptNo}] PM 修正 plan（v${planVersion}）→ 同一條分支接著做`)
+      d.emit({ type: 'plan-revised', card: card.id, attempt: attemptNo, version: planVersion })
     }
 
     // ── 走到這裡代表要換方案 ──
@@ -183,7 +181,7 @@ export async function runPipeline(
 
     if (!pendingReplacement.trim()) {
       // 「修正次數用完」那條路徑還沒拿到新 plan，這裡才去要
-      const pm = await askPm(agents.pm, card, attempts[attempts.length - 1], excluded, repo, 'force-replace')
+      const pm = await askPm(d, card, attempts[attempts.length - 1], excluded, repo, 'force-replace')
       cost += pm.cost
       if (pm.rateLimited) return { kind: 'rate-limited', attempts, costUsd: cost }
       if (!pm.decision || pm.decision.kind === 'handback') {
@@ -193,7 +191,7 @@ export async function runPipeline(
       pendingReplacement = pm.decision.plan
     }
     plan = pendingReplacement
-    log(`   [方案 ${attemptNo}] → 換方案`)
+    d.emit({ type: 'plan-replaced', card: card.id, attempt: attemptNo })
 
     // autonomy: propose —— 換方案改變的是「你批准過的做法」，所以要重新批准。
     // 修正不受此限：它只補細節，你批准的做法本身沒變。
@@ -222,11 +220,10 @@ async function runAttempt(
   plan: string,
   attemptNo: number,
   planVersion: number,
-  log: (l: string) => void,
-  agents: Agents,
+  d: Dispatcher,
 ): Promise<AttemptRecord> {
   const cfg = card.runner!
-  const tag = planVersion === 1 ? `方案 ${attemptNo}` : `方案 ${attemptNo}·v${planVersion}`
+  const at = { card: card.id, attempt: attemptNo, version: planVersion }
   const rec: AttemptRecord = {
     no: attemptNo,
     planVersion,
@@ -240,7 +237,8 @@ async function runAttempt(
 
   for (let roundNo = 1; roundNo <= MAX_ROUNDS; roundNo++) {
     const isFirst = roundNo === 1
-    const dev = isFirst ? agents.junior : agents.senior
+    const devRole = isFirst ? ('junior' as const) : ('senior' as const)
+    const devSpec = d.describe(devRole)
     const round: RoundRecord = {
       no: roundNo,
       role: isFirst ? 'junior' : 'senior',
@@ -251,11 +249,11 @@ async function runAttempt(
     }
     rec.rounds.push(round)
 
-    log(`   [${tag}·輪 ${roundNo}] ${dev.role} 開發（${dev.model} / ${dev.effort}）`)
-    const devResult = await invoke(
-      dev,
+    d.emit({ type: 'round-start', ...at, round: roundNo, role: devRole, ...devSpec })
+    const devResult = await d.invoke(
+      devRole,
       isFirst ? devPrompt(card, plan) : takeoverPrompt(card, plan, rec),
-      { cwd: repo },
+      repo,
     )
     round.cost += devResult.costUsd ?? 0
     rec.cost += devResult.costUsd ?? 0
@@ -289,12 +287,12 @@ async function runAttempt(
     let v = await verify(cfg.verify, repo)
     round.results = v.results
     round.verifySummary = summarize(v)
-    log(`   [${tag}·輪 ${roundNo}] 驗收 ${round.verifySummary}`)
+    d.emit({ type: 'verify', ...at, round: roundNo, summary: round.verifySummary, passed: passed(v) })
 
     // 減法只在第一輪做 —— 第二輪的開發者就是 senior，他寫的時候已經在減了。
     if (isFirst && passed(v)) {
-      log(`   [${tag}·輪 ${roundNo}] senior 減法 review`)
-      const reduce = await invoke(agents.senior, reducePrompt(card, plan), { cwd: repo })
+      d.emit({ type: 'reduce-start', ...at, round: roundNo })
+      const reduce = await d.invoke('senior', reducePrompt(card, plan), repo)
       round.cost += reduce.costUsd ?? 0
       rec.cost += reduce.costUsd ?? 0
       if (isRateLimited(reduce)) {
@@ -306,14 +304,14 @@ async function runAttempt(
       v = await verify(cfg.verify, repo)
       round.results = v.results
       round.verifySummary = summarize(v)
-      log(`   [${tag}·輪 ${roundNo}] 減法後驗收 ${round.verifySummary}`)
+      d.emit({ type: 'verify', ...at, round: roundNo, summary: round.verifySummary, passed: passed(v), afterReduction: true })
     }
 
     const shape = analyze(rec.rounds.map((r) => r.results))
 
     if (passed(v)) {
-      log(`   [${tag}·輪 ${roundNo}] QA 判定`)
-      const qaResult = await invoke(agents.qa, qaPrompt(card, plan, v.results), { cwd: repo })
+      d.emit({ type: 'qa-start', ...at, round: roundNo })
+      const qaResult = await d.invoke('qa', qaPrompt(card, plan, v.results), repo)
       round.cost += qaResult.costUsd ?? 0
       rec.cost += qaResult.costUsd ?? 0
       if (isRateLimited(qaResult)) {
@@ -334,7 +332,7 @@ async function runAttempt(
         rec.reason = `QA 判定方案不足：${verdict.detail}`
         return rec
       }
-      log(`   [${tag}·輪 ${roundNo}] QA 退回：${describeVerdict(verdict)}`)
+      d.emit({ type: 'qa-reject', ...at, round: roundNo, detail: describeVerdict(verdict) })
       continue
     }
 
@@ -343,7 +341,7 @@ async function runAttempt(
       rec.reason = describe(shape)
       return rec
     }
-    log(`   [${tag}·輪 ${roundNo}] ${describe(shape)} → 留內層`)
+    d.emit({ type: 'stay-inner', ...at, round: roundNo, shape: describe(shape) })
   }
 
   rec.ended = 'rounds-exhausted'
@@ -354,14 +352,14 @@ async function runAttempt(
 // ── PM：修正、換方案，還是交回人 ────────────────────────────────────────
 
 async function askPm(
-  pmSpec: AgentSpec,
+  d: Dispatcher,
   card: Card,
   failed: AttemptRecord,
   excluded: readonly string[],
   repo: string,
   mode: 'decide' | 'force-replace',
 ): Promise<{ decision: PmDecision | null; cost: number; rateLimited: boolean }> {
-  const r = await invoke(pmSpec, pmPrompt(card, failed, excluded, mode), { cwd: repo })
+  const r = await d.invoke('pm', pmPrompt(card, failed, excluded, mode), repo)
   const cost = r.costUsd ?? 0
   if (isRateLimited(r)) return { decision: null, cost, rateLimited: true }
   if (!r.ok) return { decision: null, cost, rateLimited: false }

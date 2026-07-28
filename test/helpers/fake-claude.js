@@ -19,13 +19,18 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
-const scriptPath = process.env.TC_FAKE_SCRIPT
-if (!scriptPath) {
-  console.error('fake-claude: 未設定 TC_FAKE_SCRIPT')
+// 腳本放在**目標 repo 裡**，不是全域環境變數 —— 一個測試可能同時開兩個
+// fixture（例如驗證兩個 board 的隔離），全域狀態會讓它們互相蓋掉。
+// cwd 是 invoke() 設定的目標 repo，所以每個 fixture 自然有自己的腳本。
+const scriptPath = resolve(process.cwd(), '.tc-fake.json')
+let steps
+try {
+  steps = JSON.parse(readFileSync(scriptPath, 'utf8'))
+} catch {
+  console.error(`fake-claude: 在 ${process.cwd()} 找不到 .tc-fake.json`)
   process.exit(2)
 }
 
-const steps = JSON.parse(readFileSync(scriptPath, 'utf8'))
 const cursorPath = `${scriptPath}.cursor`
 
 let i = 0
@@ -45,8 +50,8 @@ writeFileSync(cursorPath, String(i + 1), 'utf8')
 
 // 記錄這次呼叫用了哪個模型 —— 測試用它確認角色路由正確
 // （例如「第二輪真的換成 senior 了嗎」）
-const logPath = process.env.TC_FAKE_LOG
-if (logPath) {
+const logPath = join(process.cwd(), '.tc-fake-calls.jsonl')
+{
   const modelIdx = process.argv.indexOf('--model')
   const effortIdx = process.argv.indexOf('--effort')
   appendFileSync(

@@ -201,10 +201,34 @@ What the pipeline may do when an approach fails:
 ## Commands
 
 ```bash
+taskcrew init [board]     # write agent definitions into the board
 taskcrew plan [board]     # PM produces implementation plans
 taskcrew run  [board]     # drain the Ready column
 taskcrew <cmd> --dry      # show what would happen, change nothing
 ```
+
+### Resident agents (optional)
+
+By default each role is spawned as a subprocess and exits when done — **no infrastructure
+required**. With Redis you can instead run each role as a resident process that subscribes
+to a work queue:
+
+```bash
+redis-server &
+taskcrew agent junior ~/my-board &      # one process per role
+taskcrew agent senior ~/my-board &
+taskcrew agent qa     ~/my-board &
+taskcrew agent pm     ~/my-board &
+
+taskcrew run ~/my-board --bus
+```
+
+This buys three things: pipeline events are published to `taskcrew:<board>:events` so an
+intake client (a chat bot, a dashboard) can show live progress; agents can later live on a
+different machine; and new agents can join by subscribing, without changing the core.
+
+**Queues are namespaced per board.** Two boards never consume each other's work — that
+isolation is a firewall guarantee, not housekeeping, and it has a test of its own.
 
 A run ends for exactly two reasons: the queue is empty, or the subscription limit is reached. There is no card cap, time cap, or spend cap — **it only ever uses your subscription quota.**
 

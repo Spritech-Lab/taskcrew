@@ -1,5 +1,5 @@
-import { loadAgents } from './agents.ts'
 import { listCards, setStatus } from './board.ts'
+import type { Dispatcher } from './dispatch.ts'
 import { checkGate } from './gate.ts'
 import { runPipeline } from './pipeline.ts'
 import { STATUS, type Card } from './types.ts'
@@ -13,8 +13,11 @@ import { STATUS, type Card } from './types.ts'
 
 export interface DrainOptions {
   boardDir: string
+  /** agent 怎麼被叫起來，以及事件往哪送 */
+  dispatch: Dispatcher
   /** 只列出會做什麼，不呼叫 agent、不改任何檔案 */
   dryRun?: boolean
+  /** dry-run 的說明文字。正式執行時所有輸出都走 dispatch.emit */
   log?: (line: string) => void
 }
 
@@ -29,6 +32,7 @@ export interface DrainSummary {
 }
 
 export async function drain(opts: DrainOptions): Promise<DrainSummary> {
+  const d = opts.dispatch
   const log = opts.log ?? ((l: string) => console.log(l))
   const s: DrainSummary = {
     done: 0,
@@ -40,31 +44,29 @@ export async function drain(opts: DrainOptions): Promise<DrainSummary> {
     costUsd: 0,
   }
 
-  const agents = await loadAgents(opts.boardDir)
   const all = await listCards(opts.boardDir)
   const queue = all
     .filter((c) => c.status === STATUS.待執行)
     .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
 
   if (queue.length === 0) {
-    log('「待執行」沒有卡，收工。')
+    d.emit({ type: 'queue-empty' })
     return s
   }
-  log(`「待執行」有 ${queue.length} 張卡。`)
+  d.emit({ type: 'queue-start', count: queue.length })
 
   for (const card of queue) {
     const verdict = await checkGate(card, all)
 
     if (verdict.kind === 'blocked') {
-      log(`⏸  ${card.id} ${card.title} —— 等 ${verdict.waitingOn.join('、')}`)
+      d.emit({ type: 'card-blocked', card: card.id, waitingOn: verdict.waitingOn })
       s.blocked++
       if (!opts.dryRun) await setStatus(card, STATUS.阻塞)
       continue
     }
 
     if (verdict.kind === 'fail') {
-      log(`✗  ${card.id} ${card.title} —— 沒過閘門：`)
-      for (const p of verdict.problems) log(`     · ${p}`)
+      d.emit({ type: 'card-rejected', card: card.id, problems: verdict.problems })
       s.rejected++
       continue
     }
@@ -74,22 +76,22 @@ export async function drain(opts: DrainOptions): Promise<DrainSummary> {
       continue
     }
 
-    log(`▸  ${card.id} ${card.title}`)
+    d.emit({ type: 'card-start', card: card.id, title: card.title })
     await setStatus(card, STATUS.執行中)
 
-    const r = await runPipeline(card, { log, agents })
+    const r = await runPipeline(card, { dispatch: d })
     s.costUsd += r.costUsd
 
     switch (r.kind) {
       case 'done':
-        log(`   ✓ 通過（${r.attempts.length} 個方案，$${r.costUsd.toFixed(2)}）`)
+        d.emit({ type: 'card-done', card: card.id, attempts: r.attempts.length, costUsd: r.costUsd })
         await setStatus(card, STATUS.執行完成回報)
         s.done++
         break
 
       case 'proposed':
         // autonomy: propose —— PM 想出新方案但不准自己執行。球回到你手上。
-        log(`   ↩ PM 提出新方案，退回「設計待批准」等你批准`)
+        d.emit({ type: 'card-proposed', card: card.id })
         await setStatus(card, STATUS.設計待批准)
         s.proposed++
         break
@@ -97,12 +99,12 @@ export async function drain(opts: DrainOptions): Promise<DrainSummary> {
       case 'rate-limited':
         // 唯一的正常煞車。卡乾淨退回，分支留著，下次接得回去。
         await setStatus(card, STATUS.待執行)
-        log('⏹  撞到訂閱額度上限，停止排空。卡已退回「待執行」，分支留著。')
+        d.emit({ type: 'rate-limited', card: card.id })
         s.stoppedByLimit = true
         return s
 
       case 'failed':
-        log(`   ✗ ${r.reason}`)
+        d.emit({ type: 'card-failed', card: card.id, reason: r.reason })
         await setStatus(card, STATUS.執行完成回報)
         s.failed++
         break

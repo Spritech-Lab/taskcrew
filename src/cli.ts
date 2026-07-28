@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { defaultAgentFiles } from './agents.ts'
+import { defaultAgentFiles, loadAgents } from './agents.ts'
+import { BusDispatcher, pingBus } from './bus.ts'
+import { LocalDispatcher, type Dispatcher } from './dispatch.ts'
 import { planAll } from './plan.ts'
 import { countPlanning, drain } from './runner.ts'
+import { runWorker } from './worker.ts'
+import type { Role } from './claude.ts'
 
 /**
  * taskcrew CLI。
@@ -23,7 +27,11 @@ taskcrew — 把 Backlog.md 看板變成無人看管的多 agent 開發產線
   taskcrew init [board]    把 agent 定義寫進 <board>/agents/，之後你自己調
   taskcrew plan [board]    PM 研究 codebase，把「規劃中」的卡產出做法
   taskcrew run  [board]    排空「待執行」欄
+  taskcrew agent <role> [board]
+                           把一個角色跑成常駐 agent（pm / junior / senior / qa）
+
   taskcrew <cmd> --dry     只列出會做什麼，不實際執行
+  taskcrew <cmd> --bus     走 Redis 派工給常駐 agent（預設是直接 spawn）
 
   board 預設為當前目錄。
 
@@ -60,6 +68,25 @@ async function main(argv: string[]): Promise<number> {
     return 0
   }
 
+  if (cmd === 'agent') {
+    const role = rest[0] as Role
+    if (!['pm', 'junior', 'senior', 'qa'].includes(role)) {
+      console.error('用法：taskcrew agent <pm|junior|senior|qa> [board]')
+      return 2
+    }
+    const boardDir = resolve(rest.slice(1).find((a) => !a.startsWith('-')) ?? process.cwd())
+    if (!(await pingBus())) {
+      console.error('連不上 Redis —— 常駐 agent 需要它。先確認 redis-server 有在跑。')
+      return 4
+    }
+    const ac = new AbortController()
+    for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+      process.on(sig, () => ac.abort())
+    }
+    await runWorker({ role, boardDir, signal: ac.signal })
+    return 0
+  }
+
   if (cmd !== 'run' && cmd !== 'plan') {
     console.error(`未知的指令：${cmd}\n`)
     console.error(USAGE)
@@ -67,11 +94,40 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const dryRun = rest.includes('--dry') || rest.includes('--dry-run')
+  const useBus = rest.includes('--bus')
   const boardDir = resolve(rest.find((a) => !a.startsWith('-')) ?? process.cwd())
-  console.log(`看板：${boardDir}${dryRun ? '  (dry-run)' : ''}\n`)
+  console.log(`看板：${boardDir}${dryRun ? '  (dry-run)' : ''}${useBus ? '  (匯流排)' : ''}\n`)
+
+  const dispatch = await makeDispatcher(boardDir, useBus)
+  if (!dispatch) return 4
+
+  try {
+    return await runCommand(cmd, { boardDir, dryRun, dispatch })
+  } finally {
+    await dispatch.close()
+  }
+}
+
+async function makeDispatcher(boardDir: string, useBus: boolean): Promise<Dispatcher | null> {
+  const agents = await loadAgents(boardDir)
+  const log = (l: string) => console.log(l)
+  if (!useBus) return new LocalDispatcher(agents, log)
+
+  if (!(await pingBus())) {
+    console.error('連不上 Redis。先啟動它，或拿掉 --bus 改用本機直接執行。')
+    return null
+  }
+  return BusDispatcher.create(boardDir, agents, log)
+}
+
+async function runCommand(
+  cmd: 'run' | 'plan',
+  o: { boardDir: string; dryRun: boolean; dispatch: Dispatcher },
+): Promise<number> {
+  const { boardDir, dryRun, dispatch } = o
 
   if (cmd === 'plan') {
-    const s = await planAll({ boardDir, dryRun })
+    const s = await planAll({ boardDir, dryRun, dispatch })
     console.log('')
     console.log(
       [`已規劃 ${s.planned}`, `未完成 ${s.failed}`, s.costUsd ? `花費 $${s.costUsd.toFixed(2)}` : null]
@@ -82,7 +138,7 @@ async function main(argv: string[]): Promise<number> {
     return s.failed > 0 ? 1 : 0
   }
 
-  const s = await drain({ boardDir, dryRun })
+  const s = await drain({ boardDir, dryRun, dispatch })
   console.log('')
   console.log(
     [

@@ -65,6 +65,7 @@ export async function makeFixture(o: FixtureOptions): Promise<Fixture> {
     await mkdir(dirname(p), { recursive: true })
     await writeFile(p, content, 'utf8')
   }
+  await writeFile(join(repoDir, '.gitignore'), '.tc-fake*\n', 'utf8')
   await run('git', ['init', '-q', '-b', 'main'], { cwd: repoDir })
   await run('git', ['add', '-A'], { cwd: repoDir })
   await run(
@@ -122,13 +123,13 @@ export async function makeFixture(o: FixtureOptions): Promise<Fixture> {
   )
   await chmod(shim, 0o755)
 
-  const scriptPath = join(root, 'script.json')
-  await writeFile(scriptPath, JSON.stringify(o.steps), 'utf8')
-  const logPath = join(root, 'calls.jsonl')
+  // 腳本與呼叫紀錄都放在目標 repo 裡 —— 沒有全域狀態，fixture 之間互不影響
+  await writeFile(join(repoDir, '.tc-fake.json'), JSON.stringify(o.steps), 'utf8')
+  const logPath = join(repoDir, '.tc-fake-calls.jsonl')
 
-  process.env.PATH = `${binDir}:${process.env.PATH}`
-  process.env.TC_FAKE_SCRIPT = scriptPath
-  process.env.TC_FAKE_LOG = logPath
+  if (!process.env.PATH?.startsWith(binDir)) {
+    process.env.PATH = `${binDir}:${process.env.PATH}`
+  }
 
   return {
     boardDir,

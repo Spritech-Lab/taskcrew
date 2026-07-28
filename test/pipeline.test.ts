@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
+import { loadAgents } from '../src/agents.ts'
 import { readCard } from '../src/board.ts'
+import { LocalDispatcher } from '../src/dispatch.ts'
 import { drain } from '../src/runner.ts'
 import { run } from '../src/shell.ts'
 import { makeFixture, verifyScript, type Step } from './helpers/fixture.ts'
@@ -26,7 +28,10 @@ const says = (text: string): Step => ({ text, cost: 0.01 })
 async function runFixture(o: Parameters<typeof makeFixture>[0]) {
   const fx = await makeFixture(o)
   const lines: string[] = []
-  const summary = await drain({ boardDir: fx.boardDir, log: (l) => lines.push(l) })
+  const log = (l: string) => lines.push(l)
+  // 整合測試走本機 dispatcher —— 匯流排那條路徑另外測，不然每個測試都要 Redis
+  const dispatch = new LocalDispatcher(await loadAgents(fx.boardDir), log)
+  const summary = await drain({ boardDir: fx.boardDir, dispatch, log })
   return { fx, summary, log: lines.join('\n') }
 }
 
