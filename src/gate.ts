@@ -11,6 +11,14 @@ import type { Card } from './types.ts'
  * Discord、web UI、別人寫的腳本），所以品質全部押在這裡。
  */
 
+/** 這些區塊裡不該留著 `taskcrew new` 的佔位文字 */
+const PLACEHOLDER_SECTIONS = [
+  'Runner Config',
+  'Description',
+  'Acceptance Criteria',
+  'Implementation Plan',
+] as const
+
 export type GateVerdict =
   /** 七項全過，可以進 queue */
   | { kind: 'pass' }
@@ -66,6 +74,24 @@ export async function checkGate(
   // 6. Implementation Plan 非空（卡被移出「設計待批准」本身就是批准，不需要額外的 approved 欄位）
   if (!stripMarkers(card.sections['Implementation Plan'] ?? '').trim()) {
     problems.push('Implementation Plan 是空的 —— PM 還沒產出做法')
+  }
+
+  // 8. 骨架的佔位文字還在
+  //
+  // `taskcrew new` 產出的佔位文字全部包在 ⟨⟩ 裡。留著就代表這張卡還沒填完。
+  //
+  // 這一項的存在是因為佔位文字**自己會滿足其他檢查** —— 「不要做什麼」那段的
+  // 說明裡就寫著 `**不要做什麼**`，驗收條件的範本裡就有 `→ 測試引用`。
+  // 沒有這一項的話，一張完全沒填的卡會被判合格，agent 拿到「⟨具體、可驗證的
+  // 描述⟩」當需求，然後對著一個不存在的測試名工作。
+  //
+  // 它擋的主要不是人，是**建卡的 agent**：需求裡沒講驗收怎麼測時，正確的行為
+  // 是把它留白讓這裡擋下來，而不是自己編一個測試名。
+  const unfilled = PLACEHOLDER_SECTIONS.filter((name) =>
+    (card.sections[name] ?? '').includes('⟨'),
+  )
+  if (unfilled.length > 0) {
+    problems.push(`還有沒填完的欄位（⟨⟩ 裡的佔位文字）：${unfilled.join('、')}`)
   }
 
   if (problems.length > 0) return { kind: 'fail', problems }

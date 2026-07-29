@@ -266,7 +266,7 @@ A run ends for exactly two reasons: the queue is empty, or the subscription limi
 ## Development
 
 ```bash
-npm test          # 96 tests; integration tests stub the agent for determinism
+npm test          # 100 tests; integration tests stub the agent for determinism
                   # 6 of them need Redis and skip automatically when it's absent
 ```
 

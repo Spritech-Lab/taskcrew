@@ -51,6 +51,13 @@ export async function newCard(o: NewCardOptions): Promise<string> {
 /**
  * 骨架的每一段都附一行說明「閘門為什麼要它」。
  *
+ * **所有佔位文字都包在 `⟨⟩` 裡**，而閘門會擋掉還留著 `⟨` 的卡。
+ *
+ * 這不是裝飾。第一版的佔位文字**自己滿足了閘門檢查** —— 例如
+ * 「不要做什麼」那段的說明文字裡就寫著 `**不要做什麼**`，於是一張完全
+ * 沒填的卡會被判 pass，然後 agent 拿到「（具體、可驗證的描述）」當需求。
+ * 樣板讓閘門變弱了，那比沒有樣板還糟。
+ *
  * 寫成註解而不是文件，是因為**你填的時候人在這個檔案裡**，翻文件那一下
  * 就是你不會做的事。填完把說明刪掉或留著都行 —— 閘門只看內容。
  */
@@ -61,12 +68,12 @@ function skeleton(project?: string): string {
 <!-- RUNNER:BEGIN -->
 \`\`\`yaml
 # project：目標 repo。閘門會檢查它存在、而且是個 git repo
-project: ${project ?? '~/code/你的專案'}
+project: ${project ?? '⟨目標 repo 路徑⟩'}
 # base_branch：分支從哪長出來。閘門會檢查它在 repo 裡找得到
 base_branch: main
 # verify：驗收指令。**必須產出逐條結果**（JSON），不能只有 exit code ——
 #         跨輪比較逐條結果是分辨「實作沒寫對」和「方案不對」的唯一客觀依據
-verify: "npm test"
+verify: "⟨吐逐條 JSON 結果的測試指令⟩"
 # autonomy：失敗到需要換方案時怎麼辦
 #   none      停下來
 #   propose   PM 產出新方案寫回卡上，退回「設計待批准」等你看（預設）
@@ -81,22 +88,22 @@ autonomy: propose
 <!-- SECTION:DESCRIPTION:BEGIN -->
 **背景**
 
-（為什麼要做這件事）
+⟨為什麼要做這件事⟩
 
 **要做什麼**
 
-（具體、可驗證的描述）
+⟨具體、可驗證的描述⟩
 
 **不要做什麼**
 
-- （閘門檢查這一段存在。無人看管時，擋掉災難最多的就是它 ——
-   允許清單一定會漏，禁止清單不會）
+- ⟨不准碰什麼。無人看管時，擋掉災難最多的就是這一段 ——
+   允許清單一定會漏，禁止清單不會⟩
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 
 <!-- AC:BEGIN -->
-- [ ] #1 （條件） → \`test/run.js::測試名稱\`
+- [ ] #1 ⟨條件⟩ → ⟨\`test/run.js::測試名\`⟩
 <!-- AC:END -->
 
 <!--
@@ -112,7 +119,7 @@ autonomy: propose
 
 ## Implementation Plan
 
-（留空。跑 \`taskcrew plan\` 讓 PM 產出，你在「設計待批准」那一欄審。
-　審過就把卡拖到「待執行」—— 卡片位置本身就是批准，不需要額外欄位）
+⟨留空。跑 \`taskcrew plan\` 讓 PM 產出，你在「設計待批准」那一欄審。
+　審過就把卡拖到「待執行」—— 卡片位置本身就是批准，不需要額外欄位⟩
 `
 }
