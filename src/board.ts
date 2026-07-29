@@ -214,12 +214,25 @@ export async function upsertSection(
   const raw = await readFile(card.path, 'utf8')
   const block = `## ${heading}\n\n${demoteHeadings(content.trim())}\n`
 
-  // 從這個標題開始，到下一個 `## ` 或檔尾為止
-  const re = new RegExp(`^##\\s+${escapeRegExp(heading)}\\s*$[\\s\\S]*?(?=^##\\s|\\z)`, 'm')
+  // 逐行找邊界，不用正規表示式。
+  //
+  // 原本寫成 `(?=^##\\s|\\z)`，但 **JavaScript 沒有 `\z`** —— 它是字母 `z` 的
+  // identity escape，不是字串結尾。於是「要換的區塊在檔案最後、內容裡剛好
+  // 沒有 z」時比對不到，變成附加而不是取代，卡片上就出現兩個同名區塊。
+  // 而 Implementation Plan 和 Implementation Notes 正好都是最後一個區塊。
+  const lines = raw.split('\n')
+  const start = lines.findIndex((l) => new RegExp(`^##\\s+${escapeRegExp(heading)}\\s*$`).test(l))
 
-  const next = re.test(raw)
-    ? raw.replace(re, block)
-    : `${raw.replace(/\s*$/, '')}\n\n${block}`
+  let next: string
+  if (start < 0) {
+    next = `${raw.replace(/\s*$/, '')}\n\n${block}`
+  } else {
+    let end = lines.length
+    for (let i = start + 1; i < lines.length; i++) {
+      if (/^##\s/.test(lines[i])) { end = i; break }
+    }
+    next = [...lines.slice(0, start), block, ...lines.slice(end)].join('\n')
+  }
 
   await writeFile(card.path, next, 'utf8')
   card.sections[heading] = content.trim()

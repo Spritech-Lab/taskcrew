@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { stripLeadingHeading } from '../src/board.ts'
 
@@ -98,4 +101,37 @@ test('ordinal 相同時用數字語意比 ID，不是字串比較', async () => 
 
   const sorted = [card('TASK-10', 1000), card('TASK-2', 1000)].sort(byBoardOrder).map((c) => c.id)
   assert.deepEqual(sorted, ['TASK-2', 'TASK-10'], '字串比較會把 TASK-10 排在 TASK-2 前面')
+})
+
+test('取代最後一個區塊時不會變成附加 —— JS 沒有 \\z', async () => {
+  // 原本用 `(?=^##\s|\z)` 判邊界，但 JS 的 `\z` 是字母 z 不是字串結尾。
+  // 於是最後一個區塊（Implementation Plan / Notes 正好都是）內容裡沒有 z 時
+  // 就比對不到，變成附加，卡片上出現兩個同名區塊。
+  const { upsertSection, readCard } = await import('../src/board.ts')
+  const dir = await mkdtemp(join(tmpdir(), 'tc-up-'))
+  const p = join(dir, 'c.md')
+  await writeFile(p, '---\nid: T-1\ntitle: t\nstatus: 待執行\n---\n\n## Description\n\n描述\n\n## Implementation Plan\n\n待產出\n', 'utf8')
+
+  const card = await readCard(p)
+  await upsertSection(card, 'Implementation Plan', '新的做法')
+
+  const raw = await readFile(p, 'utf8')
+  assert.equal((raw.match(/^## Implementation Plan$/gm) ?? []).length, 1, '不能有兩個同名區塊')
+  assert.match(raw, /新的做法/)
+  assert.doesNotMatch(raw, /待產出/, '舊內容要被換掉')
+  assert.match(raw, /## Description\n\n描述/, '相鄰區塊不能被動到')
+})
+
+test('取代中間的區塊，後面的區塊要留著', async () => {
+  const { upsertSection, readCard } = await import('../src/board.ts')
+  const dir = await mkdtemp(join(tmpdir(), 'tc-up2-'))
+  const p = join(dir, 'c.md')
+  await writeFile(p, '---\nid: T-1\ntitle: t\nstatus: 待執行\n---\n\n## Description\n\n舊描述\n\n## Acceptance Criteria\n\n- [ ] #1 x\n', 'utf8')
+
+  const card = await readCard(p)
+  await upsertSection(card, 'Description', '新描述')
+
+  const raw = await readFile(p, 'utf8')
+  assert.match(raw, /新描述/)
+  assert.match(raw, /## Acceptance Criteria\n\n- \[ \] #1 x/, '後面的區塊要完整留著')
 })
