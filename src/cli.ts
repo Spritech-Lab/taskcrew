@@ -2,6 +2,7 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { defaultAgentFiles, loadAgents } from './agents.ts'
+import { newCard } from './new.ts'
 import { BusDispatcher, pingBus, sendCommand } from './bus.ts'
 import { LocalDispatcher, type Dispatcher } from './dispatch.ts'
 import { planAll } from './plan.ts'
@@ -27,6 +28,8 @@ taskcrew — 把 Backlog.md 看板變成無人看管的多 agent 開發產線
 
 用法：
   taskcrew init [board]    把 agent 定義寫進 <board>/agents/，之後你自己調
+  taskcrew new "<標題>" [board] [--parent <卡號>] [--dep <卡號,...>] [--project <路徑>]
+                           建一張卡的骨架，六個區塊都在，附閘門的要求說明
   taskcrew plan [board]    PM 研究 codebase，把「規劃中」的卡產出做法
   taskcrew run  [board]    排空「待執行」欄
   taskcrew agent <role> [board]
@@ -50,6 +53,12 @@ taskcrew — 把 Backlog.md 看板變成無人看管的多 agent 開發產線
 不設卡數上限、不設時間上限、不設花費上限 —— 一律只吃訂閱額度。
 `.trim()
 
+/** `--flag <值>` 的值；沒有這個旗標就回 undefined */
+function flagValue(args: string[], flag: string): string | undefined {
+  const i = args.indexOf(flag)
+  return i >= 0 ? args[i + 1] : undefined
+}
+
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv
 
@@ -57,6 +66,28 @@ async function main(argv: string[]): Promise<number> {
     console.log(USAGE)
     return 0
   }
+  if (cmd === 'new') {
+    const title = rest.find((a) => !a.startsWith('-'))
+    if (!title) {
+      console.error('要給標題：taskcrew new "卡片標題"')
+      return 2
+    }
+    const positional = rest.filter((a) => !a.startsWith('-'))
+    const boardDir = resolve(positional[1] ?? process.cwd())
+    const path = await newCard({
+      boardDir,
+      title,
+      parent: flagValue(rest, '--parent'),
+      dependencies: flagValue(rest, '--dep')?.split(',').map((x) => x.trim()).filter(Boolean),
+      project: flagValue(rest, '--project'),
+    })
+    console.log(`建立 ${path}`)
+    console.log('')
+    console.log('接下來：把 Runner Config、Description、Acceptance Criteria 填完，')
+    console.log('卡片拖到「規劃中」，跑 taskcrew plan 讓 PM 產出做法。')
+    return 0
+  }
+
   if (cmd === 'init') {
     const dir = resolve(rest.find((a) => !a.startsWith('-')) ?? process.cwd())
     const agentsDir = join(dir, 'agents')
