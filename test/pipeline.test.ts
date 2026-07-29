@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile, realpath, writeFile } from 'node:fs/promises'
 import { test } from 'node:test'
 import { loadAgents } from '../src/agents.ts'
-import { readCard } from '../src/board.ts'
+import { listCards, readCard, setStatus } from '../src/board.ts'
 import { LocalDispatcher } from '../src/dispatch.ts'
 import { planAll } from '../src/plan.ts'
 import { drain } from '../src/runner.ts'
@@ -834,4 +834,60 @@ test('排空的順序照看板，不照卡片 ID', async () => {
   const s = await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
   assert.equal(s.done, 2)
   assert.deepEqual(seen, ['TASK-2', 'TASK-1'], '被拖到前面的卡要先跑')
+})
+
+// ── 三層：模組 → 功能 → 子任務 ──────────────────────────────────────────
+//
+// 「卡片 = 功能，milestone = 模組」—— milestone 只是父子卡再往上加一層。
+// 機制上不該有新東西：每一層都只等自己的直接子卡，整合自己的直接子卡。
+// 但「應該會遞迴組合」是推論，不是事實，所以釘死它。
+
+test('三層階層整個跑完，最上層拿到所有後代的成果', async () => {
+  // 每張卡留下一個**專屬檔案**。用同一個檔案的話假 agent 寫的內容一樣 →
+  // 沒有 commit → 所有分支都指向 main 同一個點，於是「是不是祖先」在任兩者
+  // 之間都 trivially 成立，測試變成空的。（第一版就是這樣寫的，變異測試才抓到。）
+  const mark = (file: string): Step => ({
+    text: '做完了',
+    cost: 0.01,
+    apply: { pattern: 'aa', [file]: file },
+  })
+  const fx = await makeFixture({
+    files: { pattern: 'aa' },
+    verify: VERIFY,
+    sections: { 'Acceptance Criteria': '- [ ] #1 整體 → `test/run.js::t0`' },
+    extraCards: [
+      { id: 'TASK-1.1', status: '待執行', repo: true, parent: 'TASK-1' },
+      { id: 'TASK-1.1.1', status: '待執行', repo: true, parent: 'TASK-1.1' },
+      { id: 'TASK-1.1.2', status: '待執行', repo: true, parent: 'TASK-1.1' },
+    ],
+    // 執行順序：兩片葉子 → 中層 → 最上層
+    steps: [
+      mark('leaf-a'), says('減完了'), says('符合要求'),
+      mark('leaf-b'), says('減完了'), says('符合要求'),
+      mark('mid'), says('減完了'), says('符合要求'),
+      mark('top'), says('減完了'), says('符合要求'),
+    ],
+  })
+
+  // 父卡在子卡跑完之前會被擋，所以要跑到看板不再前進為止 —— 跟真的用起來一樣
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  let done = 0
+  for (let round = 0; round < 5; round++) {
+    const s = await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+    if (s.done === 0) break
+    done += s.done
+    for (const c of await listCards(fx.boardDir)) {
+      if (c.status === '阻塞') await setStatus(c, '待執行')
+    }
+  }
+  assert.equal(done, 4, '四張卡全部要跑完')
+
+  // 最上層的成果要含有兩片葉子的產出 —— 那才是「遞迴組合」真的成立的證據
+  for (const f of ['leaf-a', 'leaf-b', 'mid']) {
+    const r = await run('git', ['cat-file', '-e', `task/task-1:${f}`], { cwd: fx.repoDir })
+    assert.equal(r.code, 0, `${f} 要出現在最上層的成果裡`)
+  }
+  // 中層只該有它自己和它的葉子，不該有最上層的東西
+  const leaked = await run('git', ['cat-file', '-e', 'task/task-1.1:top'], { cwd: fx.repoDir })
+  assert.notEqual(leaked.code, 0, '中層不該含有最上層的產出')
 })

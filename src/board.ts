@@ -265,8 +265,8 @@ function normalize(s: string): string {
  *
  * 沒有 `ordinal` 的卡排在最後（手寫的卡可能沒這個欄位），同順位再比 ID。
  *
- * 刻意**不把 milestone 加進排序**：看板一欄就是一個扁平清單，執行順序要跟
- * 你看到的一樣。milestone 的先後是閘門的事，不是排序的事。
+ * 刻意**不把 Backlog.md 的 milestone 加進排序**：看板一欄就是一個扁平清單，
+ * 執行順序要跟你看到的一樣。要讓某些卡先跑，就在 UI 上把它們拖到前面。
  */
 export function byBoardOrder(a: Card, b: Card): number {
   const oa = a.ordinal ?? Number.POSITIVE_INFINITY

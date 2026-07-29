@@ -241,7 +241,7 @@ assignee: []
 labels:
   - no-auto                               # 唯一有意義的 label
 dependencies: []                          # 要等哪些卡產出成果
-parent_task_id: TASK-175                  # 父卡；只允許兩層
+parent_task_id: TASK-175                  # 父卡；層數不限
 ordinal: 2000                             # 排序
 priority: medium
 created_date: '2026-07-27 06:55'
@@ -251,7 +251,7 @@ updated_date: '2026-07-27 06:56'
 
 | 欄位 | 說明 |
 |---|---|
-| `parent_task_id` | 原生支援。子卡 ID 自動變成階層形式（`TASK-1` → `TASK-1.1`），終端看板也原生畫出樹狀結構 |
+| `parent_task_id` | 原生支援，**層數不限**。ID 自動階層化（`TASK-1` → `TASK-1.1` → `TASK-1.1.1`），終端看板畫出樹狀結構。三層的用法是「模組 → 功能 → 子任務」，機制上不需要新東西：每層只等自己的直接子卡、只整合自己的直接子卡，遞迴自然組合（實測驗證） |
 | `dependencies` | 解除條件見 §4.2 —— 預設「跑完且通過」就放行，不等人驗。要等人驗的地基另外標 `require_review` |
 | `labels: no-auto` | 唯一有意義的 label：「這張我要自己來」 |
 | `status` | 九個狀態在 `backlog/config.yml` 的 `statuses` 陣列定義，支援中文 |
