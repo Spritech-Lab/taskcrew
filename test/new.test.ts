@@ -149,3 +149,12 @@ test('父卡 / 依賴會傳給 backlog，ID 自動階層化', { skip: !hasBacklo
   assert.equal((await readCard(grand)).id, 'TASK-1.1.1', '三層要疊得起來')
   assert.equal((await readCard(grand)).parentTaskId, 'TASK-1.1')
 })
+
+test('旗標的值不會被當成 board 目錄', { skip: !hasBacklog && '沒有 backlog CLI' }, async () => {
+  // `taskcrew new "標題" --project ~/x` 曾經把 ~/x 當成 board 目錄，
+  // 於是跑去那裡找看板然後失敗。旗標的值不是位置參數。
+  const { positionalsForTest } = await import('../src/cli.ts')
+  assert.deepEqual(positionalsForTest(['標題', '--project', '~/x']), ['標題'])
+  assert.deepEqual(positionalsForTest(['標題', '/board', '--project', '~/x']), ['標題', '/board'])
+  assert.deepEqual(positionalsForTest(['標題', '--parent', 'TASK-1', '--dry']), ['標題'])
+})

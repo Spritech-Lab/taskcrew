@@ -53,10 +53,35 @@ taskcrew — 把 Backlog.md 看板變成無人看管的多 agent 開發產線
 不設卡數上限、不設時間上限、不設花費上限 —— 一律只吃訂閱額度。
 `.trim()
 
+/** 這些旗標後面跟著一個值，那個值不是位置參數 */
+const VALUE_FLAGS = ['--parent', '--dep', '--project', '--at'] as const
+
 /** `--flag <值>` 的值；沒有這個旗標就回 undefined */
 function flagValue(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag)
   return i >= 0 ? args[i + 1] : undefined
+}
+
+/**
+ * 位置參數。**要跳過旗標的值** —— 否則
+ * `taskcrew new "標題" --project ~/x` 會把 `~/x` 當成 board 目錄，
+ * 然後跑去那裡找看板。（實際踩到過。）
+ */
+export function positionalsForTest(args: string[]): string[] {
+  return positionals(args)
+}
+
+function positionals(args: string[]): string[] {
+  const out: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a.startsWith('-')) {
+      if ((VALUE_FLAGS as readonly string[]).includes(a)) i++ // 連它的值一起跳過
+      continue
+    }
+    out.push(a)
+  }
+  return out
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -67,12 +92,12 @@ async function main(argv: string[]): Promise<number> {
     return 0
   }
   if (cmd === 'new') {
-    const title = rest.find((a) => !a.startsWith('-'))
+    const positional = positionals(rest)
+    const title = positional[0]
     if (!title) {
       console.error('要給標題：taskcrew new "卡片標題"')
       return 2
     }
-    const positional = rest.filter((a) => !a.startsWith('-'))
     const boardDir = resolve(positional[1] ?? process.cwd())
     const path = await newCard({
       boardDir,
@@ -249,9 +274,14 @@ async function runCommand(
   return s.failed > 0 || s.rejected > 0 ? 1 : 0
 }
 
-main(process.argv.slice(2))
-  .then((code) => process.exit(code))
-  .catch((e) => {
-    console.error(e instanceof Error ? e.message : String(e))
-    process.exit(1)
-  })
+// 只有被當成指令執行時才跑。**沒有這道防護的話，任何 import 這個模組的
+// 程式碼都會意外執行整個 CLI** —— 測試裡踩過：import 進來就印出說明並
+// process.exit(0)，整個測試行程被殺掉，而那個檔案的斷言看起來像「通過」。
+if (import.meta.main) {
+  main(process.argv.slice(2))
+    .then((code) => process.exit(code))
+    .catch((e) => {
+      console.error(e instanceof Error ? e.message : String(e))
+      process.exit(1)
+    })
+}
