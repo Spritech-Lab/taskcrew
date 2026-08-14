@@ -106,6 +106,28 @@ export function scopeToCard(
   }
 }
 
+/**
+ * 一行驗收條件的 `→` 後面可能有好幾個引用，形式有三種：
+ *
+ *   `test/run.js::slug-lowercases`   指定測試 → 只驗那一條
+ *   `slug-lowercases`                 只給名字 → 同上
+ *   `test/news.test.ts`               整個檔案 → 驗那個檔的全部
+ *
+ * 第三種是刻意的用法：一張卡引用前面卡片的測試檔，防止 agent 為了讓新測試
+ * 過而改壞舊的產出。它不是打錯字。
+ */
+export function splitRefs(raw: string): string[] {
+  return raw
+    .split(/[`\s]+/)
+    .map((x) => x.replace(/[`'"]/g, '').trim())
+    .filter(Boolean)
+}
+
+/** 這個引用是「整個檔案」而不是單一測試嗎 */
+export function isFileRef(ref: string): boolean {
+  return !ref.includes('::') && /\.(test\.)?[cm]?[jt]s$/.test(ref)
+}
+
 /** `test/run.js::slug-lowercases` → `slug-lowercases`；沒有 :: 就用整串 */
 export function normalizeRef(ref: string): string {
   const s = ref.replace(/[`'"]/g, '').trim()

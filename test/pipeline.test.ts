@@ -955,3 +955,31 @@ test('規劃提示要求 PM 檢查驗收條件的漏洞', async () => {
   assert.match(prompt, /驗收條件的漏洞/, 'PM 的提示要求它檢查驗收條件')
   assert.match(prompt, /會不會仍然是錯的東西/, '要問對問題，不是泛泛地「檢查一下」')
 })
+
+test('引用整個測試檔不算「不存在的測試」', async () => {
+  // 一張卡引用前面卡片的測試檔（例如 `test/news.test.ts`），用途是防止 agent
+  // 為了讓新測試過而改壞舊的產出。那是刻意的用法，不是打錯字。
+  //
+  // 第一版的檢查沒涵蓋這種形式，第一次上場就誤擋 —— 而那個格式在既有的
+  // 三張卡上都在用。
+  const { summary } = await runFixture({
+    files: { pattern: 'aaa' },
+    verify: VERIFY,
+    sections: { 'Acceptance Criteria': '- [ ] #1 舊的不能被改壞 → `test/run.js`' },
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+  assert.equal(summary.done, 1, '整個檔案的引用要放行')
+})
+
+test('一行裡有多個引用，每個都要檢查', async () => {
+  const { summary, log } = await runFixture({
+    files: { pattern: 'aaa' },
+    verify: VERIFY,
+    sections: {
+      'Acceptance Criteria': '- [ ] #1 條件 → `test/run.js::t0` `test/run.js::根本沒有這條`',
+    },
+    steps: [],
+  })
+  assert.equal(summary.rejected, 1, '同一行裡壞掉的那個也要抓到')
+  assert.match(log, /根本沒有這條/)
+})

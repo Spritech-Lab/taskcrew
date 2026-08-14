@@ -2,7 +2,7 @@ import { access } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { git } from './shell.ts'
-import { normalizeRef, testRefs, verify } from './verify.ts'
+import { isFileRef, normalizeRef, splitRefs, testRefs, verify } from './verify.ts'
 import type { Card } from './types.ts'
 
 /**
@@ -50,11 +50,16 @@ export async function missingTestRefs(
 
   const names = outcome.results.map((r) => r.name.toLowerCase())
   const missing: string[] = []
-  for (const ref of refs) {
-    const want = normalizeRef(ref)
-    if (!want) continue
-    if (!names.some((n) => n === want || n.includes(want) || want.includes(n))) {
-      missing.push(want)
+  for (const raw of refs) {
+    for (const ref of splitRefs(raw)) {
+      // 整個檔案的引用（例如 `test/news.test.ts`）不比對測試名 —— 那是刻意的
+      // 用法：引用前面卡片的測試檔，防止 agent 改壞舊的產出。
+      if (isFileRef(ref)) continue
+      const want = normalizeRef(ref)
+      if (!want) continue
+      if (!names.some((n) => n === want || n.includes(want) || want.includes(n))) {
+        missing.push(want)
+      }
     }
   }
   return missing
