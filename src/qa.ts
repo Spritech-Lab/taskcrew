@@ -20,15 +20,32 @@ export function parseVerdict(text: string): QaVerdict {
     .map(strip)
     .filter((l) => l.length > 0)
 
-  // 只看前幾行 —— 判定應該在最前面，往後翻太多會撿到解釋文字裡的關鍵字
-  for (const line of lines.slice(0, 3)) {
-    if (/^符合要求/.test(line)) return { kind: 'pass' }
-    const bug = /^IMPLEMENTATION_BUG[:：]\s*(.*)$/.exec(line)
-    if (bug) return { kind: 'implementation-bug', detail: bug[1].trim() || '（未說明）' }
-    const inadequate = /^PLAN_INADEQUATE[:：]\s*(.*)$/.exec(line)
-    if (inadequate) return { kind: 'plan-inadequate', detail: inadequate[1].trim() || '（未說明）' }
+  // **兩端都掃，中間不碰。**
+  //
+  // 提示裡寫了「第一行必須是判定」，但那是約定，而約定會被忽略：驗收條件一多
+  // （12-14 條），模型就會先做逐條分析的表格、判定推到最後面。實跑連續兩張卡
+  // 都這樣，每次都害 senior 白跑一輪 Opus xhigh（約 $1），而實作根本沒問題。
+  //
+  // 模型的習慣不外乎「先講結論」或「先分析再結論」，掃頭尾就都涵蓋了。
+  // 中間的解釋文字仍然不掃 —— 那是當初限制只看前幾行的理由，
+  // 解釋裡提到「IMPLEMENTATION_BUG 這種情況」會被誤判成判定。
+  const head = lines.slice(0, 3)
+  const tail = lines.slice(-3)
+  for (const line of [...head, ...tail]) {
+    const v = verdictOf(line)
+    if (v) return v
   }
   return { kind: 'unparsed', text: text.trim() }
+}
+
+/** 一行是不是判定。不是就回 null。 */
+function verdictOf(line: string): QaVerdict | null {
+  if (/^符合要求/.test(line)) return { kind: 'pass' }
+  const bug = /^IMPLEMENTATION_BUG[:：]\s*(.*)$/.exec(line)
+  if (bug) return { kind: 'implementation-bug', detail: bug[1].trim() || '（未說明）' }
+  const inadequate = /^PLAN_INADEQUATE[:：]\s*(.*)$/.exec(line)
+  if (inadequate) return { kind: 'plan-inadequate', detail: inadequate[1].trim() || '（未說明）' }
+  return null
 }
 
 /** 剝掉 markdown 裝飾與清單符號，只留判定本身 */

@@ -39,9 +39,29 @@ test('判定前有空行也認得', () => {
   assert.deepEqual(parseVerdict('\n\n符合要求\n'), { kind: 'pass' })
 })
 
-test('關鍵字埋在解釋文字深處不算判定', () => {
+test('判定放在最後也算 —— 模型常常先分析再下結論', () => {
+  // 原本只掃前 3 行，理由是「判定應該在最前面」。實跑連續兩張卡都不是這樣：
+  // 驗收條件一多（12-14 條），QA 就先做逐條分析的表格，判定推到最後。
+  // 每次都害 senior 白跑一輪 Opus xhigh，而實作根本沒問題。
+  //
+  // 提示裡寫「第一行必須是判定」是約定，約定會被忽略；掃頭尾是機制。
   const v = parseVerdict('第一行\n第二行\n第三行\n第四行\n符合要求')
-  assert.equal(v.kind, 'unparsed')
+  assert.equal(v.kind, 'pass')
+})
+
+test('判定埋在正中間不算 —— 那多半是解釋文字提到關鍵字', () => {
+  // 掃頭尾但不掃中間，是為了擋這種：
+  // 「…如果實作有問題我會回 IMPLEMENTATION_BUG: …」那是說明不是判定。
+  const long = [
+    '開始檢查',
+    '第二行',
+    '第三行',
+    'IMPLEMENTATION_BUG: 這只是我在說明格式',
+    '第五行',
+    '第六行',
+    '還在分析中',
+  ].join('\n')
+  assert.equal(parseVerdict(long).kind, 'unparsed')
 })
 
 test('完全沒照格式 → unparsed，不猜', () => {
