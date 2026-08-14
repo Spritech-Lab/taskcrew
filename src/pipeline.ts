@@ -155,7 +155,7 @@ async function run(card: Card, opts: PipelineOptions): Promise<PipelineResult> {
     const freshRoles = attemptNo > 1 ? new Set<'pm' | 'junior' | 'senior' | 'qa'>(['pm', 'junior', 'senior', 'qa']) : new Set<'pm' | 'junior' | 'senior' | 'qa'>()
 
     while (true) {
-      const attempt = await runAttempt(card, repo, branch, plan, attemptNo, planVersion, d, freshRoles)
+      const attempt = await runAttempt(card, repo, branch, plan, attemptNo, planVersion, d, freshRoles, opts.baseRef)
       attempts.push(attempt)
       cost += attempt.cost
 
@@ -263,6 +263,8 @@ async function runAttempt(
   planVersion: number,
   d: Dispatcher,
   freshRoles: Set<'pm' | 'junior' | 'senior' | 'qa'>,
+  /** 這張卡的起點。QA 只看相對於它的改動 */
+  baseRef: string,
 ): Promise<AttemptRecord> {
   const cfg = card.runner!
   const at = { card: card.id, attempt: attemptNo, version: planVersion }
@@ -357,7 +359,8 @@ async function runAttempt(
 
     if (passed(v)) {
       d.emit({ type: 'qa-start', ...at, round: roundNo })
-      const qaResult = await d.invoke('qa', qaPrompt(card, plan, v.results), repo, {
+      const diff = await changedSince(repo, baseRef)
+      const qaResult = await d.invoke('qa', qaPrompt(card, plan, v.results, diff), repo, {
         fresh: takeFresh(freshRoles, 'qa'),
       })
       round.cost += qaResult.costUsd ?? 0
@@ -519,7 +522,30 @@ function reducePrompt(card: Card, plan: string): string {
   ].join('\n')
 }
 
-function qaPrompt(card: Card, plan: string, results: TestResult[] | null): string {
+/**
+ * 這次改動的 diff（相對於卡片的起點）。
+ *
+ * QA 只該看這個，不該看整個 repo —— 它曾經把**既有的**問題算到這次改動頭上，
+ * 把一張其實修好了那個問題的卡片退回兩輪。（實跑：agent 移除了迴圈裡多餘的
+ * `subscribeAlerts()`，QA 卻說它加上去的。）
+ *
+ * 太長就截斷並說明 —— 塞爆提示只會讓整輪失敗，而看不完的 diff 本來就代表
+ * 這張卡太大了。
+ */
+async function changedSince(repo: string, baseRef: string): Promise<string> {
+  const r = await git(repo, ['diff', baseRef, '--', '.'])
+  if (r.code !== 0) return '（拿不到 diff）'
+  const MAX = 60_000
+  if (r.stdout.length <= MAX) return r.stdout
+  return `${r.stdout.slice(0, MAX)}\n\n…（diff 太長已截斷，只顯示前 ${MAX} 字）`
+}
+
+function qaPrompt(
+  card: Card,
+  plan: string,
+  results: TestResult[] | null,
+  diff: string,
+): string {
   return [
     `## QA：${card.title}`,
     '',
@@ -536,7 +562,18 @@ function qaPrompt(card: Card, plan: string, results: TestResult[] | null): strin
     '### 這次採用的做法',
     plan,
     '',
-    '請看工作區裡的改動，回答：**這份產出符不符合要求？**',
+    '### 這次的改動（相對於這張卡的起點）',
+    '',
+    '```diff',
+    diff,
+    '```',
+    '',
+    '回答：**這份改動符不符合要求？**',
+    '',
+    '**只評判上面這份 diff。** repo 裡其他地方的問題不是這張卡的責任 ——',
+    '把既有的問題算到這次改動頭上，會讓一張其實修好了問題的卡被退回。',
+    '要指出哪裡有問題時，**引用 diff 裡的實際內容**，不要只給行號。',
+    '',
     '特別留意有沒有靠改測試、加 stub、寫死回傳值來過關。',
   ].join('\n')
 }

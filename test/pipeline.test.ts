@@ -995,3 +995,57 @@ test('測試名含大寫字母也要對得上 —— 比對兩邊都要轉小寫
   })
   assert.equal(summary.done, 1, '大小寫不該影響比對')
 })
+
+// ── QA 只看這次的改動 ───────────────────────────────────────────────────
+//
+// 實跑撞到：agent 移除了迴圈裡多餘的 subscribeAlerts()，QA 卻說它「加上去的」，
+// 把一張其實修好了那個問題的卡片退回兩輪、$3.14 白花。
+// 它看的是整個檔案，於是把既有的問題算到這次改動頭上。
+
+test('QA 的提示裡有這次的 diff', async () => {
+  const fx = await makeFixture({
+    files: { pattern: 'xxx', 既有的檔案: '這是本來就在的內容' },
+    verify: VERIFY,
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+
+  const qa = (await fx.calls())[2]
+  assert.match(qa.prompt, /```diff/, 'QA 要拿到 diff')
+  assert.match(qa.prompt, /aaa/, 'diff 要含這次改的內容')
+})
+
+test('QA 的提示不含這次沒動到的既有檔案內容', async () => {
+  // 這是整條的重點：既有的問題不該被算到這次改動頭上。
+  const fx = await makeFixture({
+    files: { pattern: 'xxx', 既有的檔案: '本來就在的內容不該出現在 diff 裡' },
+    verify: VERIFY,
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+
+  const qa = (await fx.calls())[2]
+  assert.doesNotMatch(
+    qa.prompt,
+    /本來就在的內容不該出現在 diff 裡/,
+    '沒動到的檔案不該出現 —— QA 會把它的問題算到這次改動頭上',
+  )
+})
+
+test('QA 被明確要求只評判這份 diff', async () => {
+  const fx = await makeFixture({
+    files: { pattern: 'xxx' },
+    verify: VERIFY,
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  await drain({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+
+  const qa = (await fx.calls())[2]
+  assert.match(qa.prompt, /只評判/, '要講明白，不能只靠它自己推斷')
+  assert.match(qa.prompt, /引用 diff 裡的實際內容/, '要求它舉證，不要只給行號')
+})
