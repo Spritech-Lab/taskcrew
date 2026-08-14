@@ -55,7 +55,10 @@ export async function missingTestRefs(
       // 整個檔案的引用（例如 `test/news.test.ts`）不比對測試名 —— 那是刻意的
       // 用法：引用前面卡片的測試檔，防止 agent 改壞舊的產出。
       if (isFileRef(ref)) continue
-      const want = normalizeRef(ref)
+      // 兩邊都要轉小寫。names 有轉、want 沒轉的話，含拉丁大寫字母的測試名
+      // （例如「…而且不叫 Gina」）就永遠對不上 —— 而純中文的名字不受影響，
+      // 所以這種 bug 只在特定內容才現形。
+      const want = normalizeRef(ref).toLowerCase()
       if (!want) continue
       if (!names.some((n) => n === want || n.includes(want) || want.includes(n))) {
         missing.push(want)

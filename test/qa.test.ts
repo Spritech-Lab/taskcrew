@@ -106,3 +106,25 @@ test('force-replace 模式下不需要標頭', async () => {
   const d = parsePmDecision('新的做法內容', 'force-replace')
   assert.equal(d?.kind, 'replace')
 })
+
+// ── 驗收條件的引用切法 ──────────────────────────────────────────────────
+
+test('測試名裡有空白不會被切碎', async () => {
+  // 測試名本來就會有空白和標點。用空白切會把一個名字拆成好幾個碎片，
+  // 然後每個碎片都被判成「不存在的測試」—— 閘門就會誤擋。
+  const { splitRefs } = await import('../src/verify.ts')
+  assert.deepEqual(
+    splitRefs('`test/digest.test.ts::全部來源掛掉 → no-sources，而且不叫 Gina`'),
+    ['test/digest.test.ts::全部來源掛掉 → no-sources，而且不叫 Gina'],
+  )
+})
+
+test('一行裡多個反引號引用要各自分開', async () => {
+  const { splitRefs } = await import('../src/verify.ts')
+  assert.deepEqual(splitRefs('`test/a.test.ts` `test/b.test.ts`'), ['test/a.test.ts', 'test/b.test.ts'])
+})
+
+test('沒有反引號就整串當一個', async () => {
+  const { splitRefs } = await import('../src/verify.ts')
+  assert.deepEqual(splitRefs('test/run.js::某測試'), ['test/run.js::某測試'])
+})

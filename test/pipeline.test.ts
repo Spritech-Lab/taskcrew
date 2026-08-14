@@ -983,3 +983,15 @@ test('一行裡有多個引用，每個都要檢查', async () => {
   assert.equal(summary.rejected, 1, '同一行裡壞掉的那個也要抓到')
   assert.match(log, /根本沒有這條/)
 })
+
+test('測試名含大寫字母也要對得上 —— 比對兩邊都要轉小寫', async () => {
+  // names 有轉小寫、want 沒轉的話，含拉丁大寫字母的名字就永遠對不上。
+  // 純中文的名字不受影響，所以這種 bug 只在特定內容才現形。
+  const { summary } = await runFixture({
+    files: { pattern: 'aaa' },
+    verify: verifyScript('./pattern'),
+    sections: { 'Acceptance Criteria': '- [ ] #1 條件 → `test/run.js::T0`' },
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+  assert.equal(summary.done, 1, '大小寫不該影響比對')
+})

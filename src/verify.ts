@@ -117,10 +117,14 @@ export function scopeToCard(
  * 過而改壞舊的產出。它不是打錯字。
  */
 export function splitRefs(raw: string): string[] {
-  return raw
-    .split(/[`\s]+/)
-    .map((x) => x.replace(/[`'"]/g, '').trim())
-    .filter(Boolean)
+  // **只在反引號的邊界切，不要在空白切** —— 測試名本來就會有空白
+  // （「全部來源掛掉 → no-sources，而且不叫 Gina」）。用空白切會把一個名字
+  // 拆成好幾個碎片，然後每個碎片都被判定成「不存在的測試」。
+  const quoted = [...raw.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim())
+  if (quoted.length > 0) return quoted.filter(Boolean)
+  // 沒有反引號就整串當一個
+  const bare = raw.replace(/['"]/g, '').trim()
+  return bare ? [bare] : []
 }
 
 /** 這個引用是「整個檔案」而不是單一測試嗎 */
