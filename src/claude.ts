@@ -77,6 +77,10 @@ export interface AgentResult {
   costUsd: number | null
   /** claude 行程的 exit code */
   exitCode: number
+  /** API 的 HTTP 狀態碼（429 = 限流）。正常結束時是 null */
+  apiErrorStatus: number | null
+  /** CLI 回報的錯誤訊息。只有 is_error 為真時才有內容 */
+  errors: string[]
   raw: string
 }
 
@@ -136,6 +140,8 @@ export async function invoke(
       sessionId: null,
       costUsd: null,
       exitCode: r.code,
+      apiErrorStatus: null,
+      errors: [r.stderr || r.stdout],
       raw: r.stderr || r.stdout,
     }
   }
@@ -146,6 +152,8 @@ export async function invoke(
       session_id?: string
       total_cost_usd?: number
       is_error?: boolean
+      api_error_status?: number | null
+      errors?: string[]
     }
     return {
       ok: parsed.is_error !== true,
@@ -153,10 +161,21 @@ export async function invoke(
       sessionId: parsed.session_id ?? null,
       costUsd: typeof parsed.total_cost_usd === 'number' ? parsed.total_cost_usd : null,
       exitCode: 0,
+      apiErrorStatus: typeof parsed.api_error_status === 'number' ? parsed.api_error_status : null,
+      errors: Array.isArray(parsed.errors) ? parsed.errors : [],
       raw: r.stdout,
     }
   } catch {
-    return { ok: false, text: '', sessionId: null, costUsd: null, exitCode: 0, raw: r.stdout }
+    return {
+      ok: false,
+      text: '',
+      sessionId: null,
+      costUsd: null,
+      exitCode: 0,
+      apiErrorStatus: null,
+      errors: ['claude 的輸出不是合法 JSON'],
+      raw: r.stdout,
+    }
   }
 }
 
@@ -167,11 +186,27 @@ export async function invoke(
  * 認出來之後必須把卡乾淨地退回「待執行」，分支留著，下次接得回去。
  */
 export function isRateLimited(r: AgentResult): boolean {
-  const s = `${r.text}\n${r.raw}`.toLowerCase()
+  // **只看結構化欄位，不掃 agent 的回覆內容。**
+  //
+  // 原本是把 result 加 raw 全文小寫化之後找 'rate limit' / 'quota' 之類的字。
+  // 那會誤判，而且誤判的方向最糟：**丟掉已經產出的成果，然後回報一個
+  // 不存在的原因**。
+  //
+  // 實際踩到過：一張「每分鐘輪詢四個外部 API 的 crawler」的卡，PM 在風險那節
+  // 寫了 API 的 rate limit，taskcrew 就判定撞到訂閱額度、把 $0.80 的 plan 丟掉。
+  // 那次 `is_error` 是 false —— 結構上完全看得出來不是撞限。
+  //
+  // 卡片的主題越接近「呼叫外部服務」越容易誤判，而那是很常見的主題。
+  if (r.ok) return false
+
+  // 429 = Too Many Requests，這是唯一明確的限流狀態碼
+  if (r.apiErrorStatus === 429) return true
+
+  // CLI 自己回報的錯誤訊息才掃關鍵字 —— 那是它寫的，不是 agent 寫的
+  const s = `${r.errors.join('\n')}\n${r.raw}`.toLowerCase()
   return (
     s.includes('rate limit') ||
     s.includes('usage limit') ||
-    s.includes('quota') ||
     s.includes('too many requests')
   )
 }
