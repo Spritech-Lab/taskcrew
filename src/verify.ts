@@ -107,7 +107,7 @@ export function scopeToCard(
 }
 
 /** `test/run.js::slug-lowercases` → `slug-lowercases`；沒有 :: 就用整串 */
-function normalizeRef(ref: string): string {
+export function normalizeRef(ref: string): string {
   const s = ref.replace(/[`'"]/g, '').trim()
   const i = s.lastIndexOf('::')
   return (i >= 0 ? s.slice(i + 2) : s).trim()

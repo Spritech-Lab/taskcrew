@@ -2,6 +2,7 @@ import { access } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { git } from './shell.ts'
+import { normalizeRef, testRefs, verify } from './verify.ts'
 import type { Card } from './types.ts'
 
 /**
@@ -26,6 +27,38 @@ export type GateVerdict =
   | { kind: 'blocked'; waitingOn: string[] }
   /** 有欄位不合格。卡留在原處，訊息告訴人要補什麼 */
   | { kind: 'fail'; problems: string[] }
+
+/**
+ * 驗收條件引用了、但實際跑不出來的測試名。
+ *
+ * 跑一次 verify 拿到真實的測試清單再比對。慢，但只在卡片進 queue 時發生一次，
+ * 而它擋掉的是「卡片永遠過不了而且看不出原因」那種最難查的狀況。
+ *
+ * verify 本身跑不起來（指令錯、repo 壞）時回空陣列 —— 那是別的檢查的事，
+ * 不要在這裡多報一次。
+ */
+export async function missingTestRefs(
+  card: Card,
+  repo: string,
+  verifyCmd: string,
+): Promise<string[]> {
+  const refs = testRefs(card.sections['Acceptance Criteria'] ?? '')
+  if (refs.length === 0) return []
+
+  const outcome = await verify(verifyCmd, repo)
+  if (!outcome.results || outcome.results.length === 0) return []
+
+  const names = outcome.results.map((r) => r.name.toLowerCase())
+  const missing: string[] = []
+  for (const ref of refs) {
+    const want = normalizeRef(ref)
+    if (!want) continue
+    if (!names.some((n) => n === want || n.includes(want) || want.includes(n))) {
+      missing.push(want)
+    }
+  }
+  return missing
+}
 
 export async function checkGate(
   card: Card,
@@ -70,6 +103,18 @@ export async function checkGate(
   // 4. 每條驗收條件都要掛對應的 test case
   const acProblems = checkAcceptanceCriteria(card.sections['Acceptance Criteria'] ?? '')
   problems.push(...acProblems)
+
+  // 4b. 而且那些 test case 要**真的存在**。
+  //
+  // 測試名是人手打進驗收條件的，打錯一個字 `scopeToCard` 就對不上，於是
+  // 悄悄退回整套測試 —— 那張卡從此被別張卡的紅字綁住，永遠過不了，
+  // 而錯誤訊息完全看不出原因。這是建卡時就該發現的事。
+  if (runner && acProblems.length === 0) {
+    const missing = await missingTestRefs(card, expandHome(runner.project), runner.verify)
+    if (missing.length > 0) {
+      problems.push(`驗收條件引用了不存在的測試：${missing.join('、')}`)
+    }
+  }
 
   // 6. Implementation Plan 非空（卡被移出「設計待批准」本身就是批准，不需要額外的 approved 欄位）
   if (!stripMarkers(card.sections['Implementation Plan'] ?? '').trim()) {

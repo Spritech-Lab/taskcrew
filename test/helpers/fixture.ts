@@ -27,6 +27,7 @@ export interface Fixture {
       resume: string | null
       cwd: string
       files: string[]
+      prompt: string
     }[]
   >
   card(): Promise<string>

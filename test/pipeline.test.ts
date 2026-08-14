@@ -891,3 +891,67 @@ test('三層階層整個跑完，最上層拿到所有後代的成果', async ()
   const leaked = await run('git', ['cat-file', '-e', 'task/task-1.1:top'], { cwd: fx.repoDir })
   assert.notEqual(leaked.code, 0, '中層不該含有最上層的產出')
 })
+
+// ── 驗收條件引用的測試要真的存在 ────────────────────────────────────────
+//
+// 測試名是人手打進驗收條件的。打錯一個字，scopeToCard 就對不上，
+// 於是悄悄退回整套測試 —— 那張卡從此被別張卡的紅字綁住、永遠過不了，
+// 而錯誤訊息完全看不出原因。
+
+test('引用不存在的測試名 → 閘門擋下來，訊息說得出是哪一個', async () => {
+  const { fx, summary, log } = await runFixture({
+    files: { pattern: 'aaa' },
+    verify: VERIFY,
+    sections: {
+      'Acceptance Criteria': '- [ ] #1 條件 → `test/run.js::這個測試根本不存在`',
+    },
+    steps: [],
+  })
+
+  assert.equal(summary.rejected, 1, '不能放行')
+  assert.equal((await fx.calls()).length, 0, '沒過閘門就不該花錢')
+  assert.match(log, /不存在的測試/, `訊息要說清楚，實際：${log}`)
+  assert.match(log, /這個測試根本不存在/, '要點名是哪一個')
+})
+
+test('引用存在的測試名就放行', async () => {
+  const { summary } = await runFixture({
+    files: { pattern: 'aaa' },
+    verify: VERIFY,
+    sections: { 'Acceptance Criteria': '- [ ] #1 條件 → `test/run.js::t0`' },
+    steps: [writes('aaa'), says('減完了'), says('符合要求')],
+  })
+  assert.equal(summary.done, 1)
+})
+
+test('verify 本身跑不起來時不要多報一次「測試不存在」', async () => {
+  // 那是別的檢查的事。在這裡多報一次只會讓真正的原因被淹掉。
+  const { log } = await runFixture({
+    files: { pattern: 'aaa' },
+    verify: 'this-command-does-not-exist-xyz',
+    sections: { 'Acceptance Criteria': '- [ ] #1 條件 → `test/run.js::t0`' },
+    steps: [says('PLAN_INFEASIBLE: 測試指令壞掉')],
+  })
+  assert.doesNotMatch(log, /不存在的測試/)
+})
+
+test('規劃提示要求 PM 檢查驗收條件的漏洞', async () => {
+  // 驗收條件是人寫的，而沒有任何東西在檢查那個人。
+  // PM 今天兩次主動抓到我的漏洞（被冷卻擋掉要不要標記 triggered、
+  // Redis 不保證持久化），但那是自發的 —— 下次不一定會有。
+  //
+  // 這條測試釘的是「有要求它做」。它做得好不好測不了，那是判斷力。
+  const fx = await makeFixture({
+    files: { pattern: 'x' },
+    verify: VERIFY,
+    status: '規劃中',
+    steps: [says('# Plan\n做法\n\n## 驗收條件的漏洞\n\n沒有發現漏洞')],
+  })
+
+  const d = new LocalDispatcher(await loadAgents(fx.boardDir), () => {})
+  await planAll({ boardDir: fx.boardDir, dispatch: d, log: () => {} })
+
+  const prompt = (await fx.calls())[0]?.prompt ?? ''
+  assert.match(prompt, /驗收條件的漏洞/, 'PM 的提示要求它檢查驗收條件')
+  assert.match(prompt, /會不會仍然是錯的東西/, '要問對問題，不是泛泛地「檢查一下」')
+})

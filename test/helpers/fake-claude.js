@@ -85,6 +85,12 @@ const logPath = join(stateDir, '.tc-fake-calls.jsonl')
       // 該看的東西（例如父卡要整合的所有子卡成果）
       cwd: process.cwd(),
       files: readdirSync(process.cwd()).filter((f) => !f.startsWith('.')),
+      // 收到的提示。測試靠它確認「有沒有要求 agent 做某件事」——
+      // 提示是約定，但「有沒有把約定講出來」是可以釘住的。
+      prompt: (() => {
+        const i = process.argv.indexOf('-p')
+        return i > 0 ? process.argv[i + 1] : ''
+      })(),
     }) + '\n',
     'utf8',
   )
